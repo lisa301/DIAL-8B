@@ -3489,6 +3489,10 @@ impl Generator for Qwen3Vl {
             return Ok(None);
         }
 
+        if self.blocks.iter().any(|block| block.requires_remote_sampling()) {
+            return Ok(None);
+        }
+
         // Multimodal prefill still needs per-layer DeepStack injection and remains
         // on the mature monolithic path. Pure-text prefill can be pipelined safely.
         if self.generated == 0 {
