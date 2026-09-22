@@ -283,6 +283,12 @@ pub trait Forwarder: Debug + Send + Sync + Display {
     /// 获取层名.
     fn layer_name(&self) -> &str;
 
+    /// Release request-local state owned by a remote executor. Local executors
+    /// keep the default no-op implementation.
+    async fn release_remote_session(&self, _session_id: SessionId) -> Result<()> {
+        Ok(())
+    }
+
     /// Optional fused local execution. None retains the legacy per-layer path.
     /// Implementations must validate the full batch before modifying any cache.
     fn forward_local_batch(
