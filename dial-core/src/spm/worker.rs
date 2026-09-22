@@ -665,6 +665,9 @@ impl<G: Generator + 'static> Worker<G> {
         let mut avg_write = 0;
         let mut avg_read = 0;
         let mut client_context: Option<WorkerContext<G::Shardable>> = None;
+        // Multiple logical inference sessions may share one persistent TCP connection.
+        // Model weights remain shared; only KV cache is isolated per request/session.
+        let mut session_caches: HashMap<super::SessionId, Cache> = HashMap::new();
 
         // 持续读取消息
         while let Ok((read_time, read_size, op_message)) =
@@ -680,14 +683,15 @@ impl<G: Generator + 'static> Worker<G> {
             let (x, ops, sampling) = match op_message {
                 /// 单操作请求
                 Message::SingleOp {
+                    session_id,
                     layer_name,
                     x,
                     index_pos,
                     block_idx,
                     sampling,
-                } => (x, vec![(layer_name, index_pos, block_idx)], sampling),
+                } => (session_id, x, vec![(layer_name, index_pos, block_idx)], sampling),
                 /// 批量操作请求
-                Message::Batch { x, batch, sampling } => (x, batch, sampling),
+                Message::Batch { session_id, x, batch, sampling } => (session_id, x, batch, sampling),
                 Message::CompactBatch { x, batch, sampling } => (
                     x,
                     Self::expand_compact_batch(
@@ -715,7 +719,10 @@ impl<G: Generator + 'static> Worker<G> {
                     ));
                 }
             };
-            let ops_summary = Self::ops_summary(&ops);
+            let cache = session_caches
+                .entry(session_id)
+                .or_insert_with(|| context.cache.as_new());
+            let ops_summary = format!("session={} {}", session_id, Self::ops_summary(&ops));
             let final_request_block_idx = ops.last().map(|(_, _, block_idx)| *block_idx);
 
             // （新增）这里避免使用 `unwrap()`：
@@ -745,7 +752,7 @@ impl<G: Generator + 'static> Worker<G> {
                     context
                         .blocks
                         .get(name)?
-                        .forward_local_batch(&x, &ops, &mut context.cache)
+                        .forward_local_batch(&x, &ops, cache)
                 })
             } else {
                 None
@@ -772,7 +779,7 @@ impl<G: Generator + 'static> Worker<G> {
                     // （新增）同样避免 `unwrap()`：把 layer/index_pos/block_idx 打进错误里，方便定位是哪一层/哪一步出错。
                     // forward 前向传播
                     match block
-                        .forward(&x, index_pos, block_idx, &mut context.cache)
+                        .forward(&x, index_pos, block_idx, cache)
                         .await
                         .map_err(|e| {
                             anyhow!(
