@@ -150,9 +150,9 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         }
     }
 
-    async fn release_request(&self, session_id: SessionId) {
+    async fn release_request(master: Arc<Mutex<Master<G>>>, session_id: SessionId) {
         let handles = {
-            let mut master = self.master.lock().await;
+            let mut master = master.lock().await;
             master.take_session_release_handles(session_id)
         };
         if handles.is_empty() { return; }
@@ -197,13 +197,13 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                         self.ready.push_back(request);
                     }
                     Err(e) => {
-                        self.release_request(request.session_id).await;
+                        Self::release_request(self.master.clone(), request.session_id).await;
                         let _ = request.events.send(EngineEvent::Error(e.to_string()));
                     }
                 }
             }
             Err(e) => {
-                self.release_request(request.session_id).await;
+                Self::release_request(self.master.clone(), request.session_id).await;
                 let _ = request.events.send(EngineEvent::Error(e.to_string()));
             }
         }
@@ -211,12 +211,12 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
 
     async fn schedule_ready(&mut self, mut request: ActiveRequest) {
         if request.events.is_closed() {
-            self.release_request(request.session_id).await;
+            Self::release_request(self.master.clone(), request.session_id).await;
             return;
         }
 
         if request.step >= self.sample_len {
-            self.release_request(request.session_id).await;
+            Self::release_request(self.master.clone(), request.session_id).await;
             let _ = request.events.send(Self::finish_event(&request));
             return;
         }
@@ -248,7 +248,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                     };
                     match token_result {
                         Ok(token) if token.is_end_of_stream => {
-                            self.release_request(request.session_id).await;
+                            Self::release_request(self.master.clone(), request.session_id).await;
                             let _ = request.events.send(Self::finish_event(&request));
                         }
                         Ok(token) => {
@@ -258,14 +258,14 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                             self.ready.push_back(request);
                         }
                         Err(e) => {
-                            self.release_request(request.session_id).await;
+                            Self::release_request(self.master.clone(), request.session_id).await;
                             let _ = request.events.send(EngineEvent::Error(e.to_string()));
                         }
                     }
                     return;
                 }
                 Err(e) => {
-                    self.release_request(request.session_id).await;
+                    Self::release_request(self.master.clone(), request.session_id).await;
                     let _ = request.events.send(EngineEvent::Error(e.to_string()));
                     return;
                 }
@@ -283,7 +283,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
             };
             match token_result {
                 Ok(token) if token.is_end_of_stream => {
-                    self.release_request(request.session_id).await;
+                    Self::release_request(self.master.clone(), request.session_id).await;
                     let _ = request.events.send(Self::finish_event(&request));
                 }
                 Ok(token) => {
@@ -294,7 +294,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                     self.ready.push_back(request);
                 }
                 Err(e) => {
-                    self.release_request(request.session_id).await;
+                    Self::release_request(self.master.clone(), request.session_id).await;
                     let _ = request.events.send(EngineEvent::Error(e.to_string()));
                 }
             }
@@ -313,7 +313,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         let job = match job {
             Ok(job) => job,
             Err(e) => {
-                self.release_request(request.session_id).await;
+                Self::release_request(self.master.clone(), request.session_id).await;
                 let _ = request.events.send(EngineEvent::Error(e.to_string()));
                 return;
             }
