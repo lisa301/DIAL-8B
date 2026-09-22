@@ -9,8 +9,7 @@ use actix_web::HttpServer;
 use actix_web::Responder;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -18,7 +17,87 @@ use crate::models::chat::Message;
 use crate::models::Generator;
 
 use super::worker::collect_worker_metrics;
-use super::{probe_worker, snapshot_distributed_profile, Master, Topology};
+use super::{
+    probe_worker, snapshot_distributed_profile, with_request_distributed_profile, Master, Topology,
+};
+
+/// A fixed set of independent model sessions.  Each slot has its own KV cache
+/// and its own persistent TCP connection to every worker.  The bounded number
+/// of slots provides backpressure instead of allowing unbounded KV-cache growth.
+struct MasterPool<G> {
+    slots: Vec<Arc<Mutex<Master<G>>>>,
+    available_tx: mpsc::UnboundedSender<usize>,
+    available_rx: Mutex<mpsc::UnboundedReceiver<usize>>,
+}
+
+struct MasterLease<G> {
+    slot_index: usize,
+    slot: Arc<Mutex<Master<G>>>,
+    available_tx: mpsc::UnboundedSender<usize>,
+}
+
+impl<G> Drop for MasterLease<G> {
+    fn drop(&mut self) {
+        let _ = self.available_tx.send(self.slot_index);
+    }
+}
+
+impl<G> MasterPool<G>
+where
+    G: Generator + Send + Sync + 'static,
+{
+    async fn new(master: Master<G>, concurrency: usize) -> anyhow::Result<Self> {
+        let concurrency = concurrency.max(1);
+        let replica_context = master.ctx.clone();
+        let mut slots = Vec::with_capacity(concurrency);
+        slots.push(Arc::new(Mutex::new(master)));
+        for slot_index in 1..concurrency {
+            log::info!(
+                "loading pipeline session slot {}/{} (independent KV cache and worker connections)",
+                slot_index + 1,
+                concurrency
+            );
+            slots.push(Arc::new(Mutex::new(
+                Master::<G>::new(replica_context.clone()).await?,
+            )));
+        }
+
+        let (available_tx, available_rx) = mpsc::unbounded_channel();
+        for slot_index in 0..slots.len() {
+            available_tx
+                .send(slot_index)
+                .map_err(|_| anyhow!("failed to initialize pipeline slot queue"))?;
+        }
+        Ok(Self {
+            slots,
+            available_tx,
+            available_rx: Mutex::new(available_rx),
+        })
+    }
+
+    async fn acquire(&self) -> anyhow::Result<MasterLease<G>> {
+        let slot_index = self
+            .available_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("pipeline slot queue closed"))?;
+        Ok(MasterLease {
+            slot_index,
+            slot: self.slots[slot_index].clone(),
+            available_tx: self.available_tx.clone(),
+        })
+    }
+
+    fn concurrency(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn primary(&self) -> Arc<Mutex<Master<G>>> {
+        self.slots[0].clone()
+    }
+}
 
 #[derive(Deserialize)]
 struct Request {
@@ -161,7 +240,7 @@ struct TopologyStatus {
     workers: Vec<WorkerStatus>,
 }
 
-async fn topology<G>(state: web::Data<Arc<RwLock<Master<G>>>>) -> impl Responder
+async fn topology<G>(state: web::Data<Arc<MasterPool<G>>>) -> impl Responder
 where
     G: Generator + Send + Sync + 'static,
 {
@@ -173,7 +252,8 @@ where
         master_device,
         master_device_idx,
     ) = {
-        let master = state.read().await;
+        let primary = state.primary();
+        let master = primary.lock().await;
         (
             master.ctx.args.api.clone().unwrap_or_default(),
             master.ctx.args.topology.clone(),
@@ -389,7 +469,7 @@ impl Response {
 }
 
 async fn chat<G>(
-    state: web::Data<Arc<RwLock<Master<G>>>>,
+    state: web::Data<Arc<MasterPool<G>>>,
     req: HttpRequest,
     messages: web::Json<Request>,
 ) -> impl Responder
@@ -406,7 +486,21 @@ where
     let Request { messages, stream } = messages.into_inner();
 
     if !stream {
-        let mut master = state.write().await;
+        let queue_started = Instant::now();
+        let lease = match state.acquire().await {
+            Ok(lease) => lease,
+            Err(error) => return HttpResponse::ServiceUnavailable().body(error.to_string()),
+        };
+        let queue_wait_s = queue_started.elapsed().as_secs_f64();
+        let slot_index = lease.slot_index;
+        let mut master = lease.slot.lock().await;
+        log::info!(
+            "pipeline admitted {} to slot {}/{} after {:.3} ms",
+            &client,
+            slot_index,
+            state.concurrency(),
+            queue_wait_s * 1000.0
+        );
 
         if let Err(e) = master.reset() {
             log::error!("reset failed for {}: {}", &client, &e);
@@ -520,7 +614,7 @@ where
     let client_for_task = client.clone();
     let model = G::MODEL_NAME.to_string();
 
-    tokio::spawn(async move {
+    tokio::spawn(with_request_distributed_profile(async move {
         let send = |tx: &mpsc::UnboundedSender<String>, payload: &str| {
             let _ = tx.send(payload.to_string());
         };
@@ -531,7 +625,26 @@ where
             .unwrap_or_default()
             .as_secs();
 
-        let mut master = state.write().await;
+        let queue_started = Instant::now();
+        let lease = match state.acquire().await {
+            Ok(lease) => lease,
+            Err(error) => {
+                let j = serde_json::json!({ "error": error.to_string() }).to_string();
+                send(&tx, &format!("data: {j}\n\n"));
+                send(&tx, "data: [DONE]\n\n");
+                return;
+            }
+        };
+        let queue_wait_s = queue_started.elapsed().as_secs_f64();
+        let slot_index = lease.slot_index;
+        let mut master = lease.slot.lock().await;
+        log::info!(
+            "pipeline admitted {} to slot {}/{} after {:.3} ms",
+            &client_for_task,
+            slot_index,
+            state.concurrency(),
+            queue_wait_s * 1000.0
+        );
 
         if let Err(e) = master.reset() {
             log::error!("reset failed for {}: {}", &client_for_task, &e);
@@ -694,7 +807,7 @@ where
         }
 
         send(&tx, "data: [DONE]\n\n");
-    });
+    }));
 
     let body = UnboundedReceiverStream::new(rx)
         .map(|s| Ok::<web::Bytes, actix_web::Error>(web::Bytes::from(s)));
@@ -705,6 +818,17 @@ where
         .insert_header(("Connection", "keep-alive"))
         .insert_header(("X-DIAL-Model", G::MODEL_NAME))
         .streaming(body)
+}
+
+async fn chat_scoped<G>(
+    state: web::Data<Arc<MasterPool<G>>>,
+    req: HttpRequest,
+    messages: web::Json<Request>,
+) -> impl Responder
+where
+    G: Generator + Send + Sync + 'static,
+{
+    with_request_distributed_profile(chat::<G>(state, req, messages)).await
 }
 
 async fn not_found() -> actix_web::Result<HttpResponse> {
@@ -743,6 +867,7 @@ where
     G: Generator + Send + Sync + 'static,
 {
     let address = master.ctx.args.api.as_ref().unwrap().to_string();
+    let pipeline_concurrency = master.ctx.args.pipeline_concurrency.max(1);
     // Base64 expands video bytes by roughly 4/3. Keep room for JSON, text and history.
     let json_limit = master
         .ctx
@@ -754,7 +879,11 @@ where
 
     log::info!("starting api on http://{} ...", &address);
 
-    let state = Arc::new(RwLock::new(master));
+    let state = Arc::new(MasterPool::new(master, pipeline_concurrency).await?);
+    log::info!(
+        "request pipeline enabled: concurrency={} (one isolated KV-cache session per slot)",
+        state.concurrency()
+    );
 
     HttpServer::new(
         move || {
@@ -766,7 +895,7 @@ where
                 .route("/web-chat", web::get().to(web_chat))
                 .route("/web-chat/styles.css", web::get().to(web_chat_styles))
                 .route("/web-chat/app.js", web::get().to(web_chat_script))
-                .route("/api/v1/chat/completions", web::post().to(chat::<G>))
+                .route("/api/v1/chat/completions", web::post().to(chat_scoped::<G>))
                 .route("/api/v1/topology", web::get().to(topology::<G>))
                 .default_service(web::route().to(not_found))
         }, //.wrap(actix_web::middleware::Logger::default()))

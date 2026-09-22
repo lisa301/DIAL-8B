@@ -562,6 +562,7 @@ curl http://127.0.0.1:8082/api/v1/topology
 - [docs/worker_w8a16.md](docs/worker_w8a16.md)：CUDA Worker W8A16；
 - [docs/auto_planner_4devices.md](docs/auto_planner_4devices.md)：四设备自动层规划；
 - [docs/edgeshard_comparison.md](docs/edgeshard_comparison.md)：EdgeShard 对比实验；
+- [docs/multi_request_pipeline.md](docs/multi_request_pipeline.md)：多请求流水线、并发参数与测试方法；
 - [run.md](run.md)：当前 RKNN/RKLLM 运行记录；
 - [run2.md](run2.md)：多板卡、视频流和系统监控记录。
 

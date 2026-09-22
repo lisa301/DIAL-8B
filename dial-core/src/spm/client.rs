@@ -2,7 +2,9 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use std::{
+    cell::RefCell,
     collections::HashMap,
+    future::Future,
     sync::{Arc, Mutex, Once, OnceLock},
     time::Instant,
 };
@@ -14,6 +16,19 @@ use super::{CompactBatch, CompactRangeBatch, Message, SamplingRequest, WorkerInf
 
 tokio::task_local! {
     static REMOTE_SAMPLING_REQUEST: SamplingRequest;
+    static REQUEST_DISTRIBUTED_PROFILE: RefCell<DistributedProfile>;
+}
+
+/// Give one HTTP inference request an isolated distributed profile.  Without
+/// this scope concurrent pipeline sessions would reset and overwrite the same
+/// process-global counters.
+pub async fn with_request_distributed_profile<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    REQUEST_DISTRIBUTED_PROFILE
+        .scope(RefCell::new(DistributedProfile::default()), future)
+        .await
 }
 
 pub async fn with_remote_sampling_request<F>(sampling: SamplingRequest, future: F) -> F::Output
@@ -51,12 +66,21 @@ fn distributed_profile() -> &'static Mutex<DistributedProfile> {
 }
 
 pub fn reset_distributed_profile() {
+    if REQUEST_DISTRIBUTED_PROFILE
+        .try_with(|profile| *profile.borrow_mut() = DistributedProfile::default())
+        .is_ok()
+    {
+        return;
+    }
     if let Ok(mut profile) = distributed_profile().lock() {
         *profile = DistributedProfile::default();
     }
 }
 
 pub fn snapshot_distributed_profile() -> DistributedProfile {
+    if let Ok(profile) = REQUEST_DISTRIBUTED_PROFILE.try_with(|profile| profile.borrow().clone()) {
+        return profile;
+    }
     distributed_profile()
         .lock()
         .map(|profile| profile.clone())
@@ -300,16 +324,24 @@ impl Client {
         let read_time = read_start.elapsed();
         let total_time = total_start.elapsed();
 
-        if let (Ok(mut profile), Message::Tensor { compute_us, .. }) =
-            (distributed_profile().lock(), &msg)
-        {
-            profile.remote_requests += 1;
-            profile.remote_total_s += total_time.as_secs_f64();
-            profile.remote_compute_s += *compute_us as f64 / 1_000_000.0;
-            profile.remote_write_s += write_time.as_secs_f64();
-            profile.remote_read_s += read_time.as_secs_f64();
-            profile.remote_write_bytes += written;
-            profile.remote_read_bytes += read_size;
+        if let Message::Tensor { compute_us, .. } = &msg {
+            let update = |profile: &mut DistributedProfile| {
+                profile.remote_requests += 1;
+                profile.remote_total_s += total_time.as_secs_f64();
+                profile.remote_compute_s += *compute_us as f64 / 1_000_000.0;
+                profile.remote_write_s += write_time.as_secs_f64();
+                profile.remote_read_s += read_time.as_secs_f64();
+                profile.remote_write_bytes += written;
+                profile.remote_read_bytes += read_size;
+            };
+            if REQUEST_DISTRIBUTED_PROFILE
+                .try_with(|profile| update(&mut profile.borrow_mut()))
+                .is_err()
+            {
+                if let Ok(mut profile) = distributed_profile().lock() {
+                    update(&mut profile);
+                }
+            }
         }
 
         if Self::transfer_trace_enabled() {

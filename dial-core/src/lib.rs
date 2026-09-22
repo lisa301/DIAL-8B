@@ -149,6 +149,15 @@ pub struct Args {
     #[arg(long)]
     pub api: Option<String>,
 
+    /// Number of independent inference sessions kept by the HTTP master.
+    ///
+    /// Values greater than one enable EdgeShard-style inter-request pipeline
+    /// parallelism: while one request is executing a remote shard, another can
+    /// use a different pipeline stage. Every session owns an independent KV
+    /// cache and independent persistent Master-to-Worker connections.
+    #[arg(long, default_value_t = 1)]
+    pub pipeline_concurrency: usize,
+
     /// （新增）作为“客户端”连接到一个已启动的 API 服务端（例如 http://127.0.0.1:8082）。
     ///
     /// 为什么要加：之前用 curl 需要手写 JSON，请求/解析都不方便；
