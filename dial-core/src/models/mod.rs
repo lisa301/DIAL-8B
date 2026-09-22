@@ -36,6 +36,44 @@ impl std::fmt::Display for Token {
     }
 }
 
+
+/// A transformer stage detached from the mutable model/session owner.  It owns the
+/// activation and the Master's request-local KV cache, so it can safely await a
+/// remote worker while the Engine prepares or executes another request.
+pub struct PipelineStageJob {
+    pub x: candle_core::Tensor,
+    pub cache: llama3::Cache,
+    pub executors: Vec<Arc<dyn Forwarder>>,
+    pub batch: Vec<(String, usize, usize)>,
+    pub remote_batch: bool,
+}
+
+pub struct PipelineStageOutput {
+    pub x: candle_core::Tensor,
+    pub cache: llama3::Cache,
+}
+
+impl PipelineStageJob {
+    pub async fn execute(mut self) -> Result<PipelineStageOutput> {
+        if self.executors.is_empty() || self.batch.is_empty() {
+            return Err(anyhow::anyhow!("empty pipeline stage"));
+        }
+        if self.remote_batch {
+            self.x = self.executors[0]
+                .forward_batch_shared(&self.x, self.batch, &mut self.cache)
+                .await?;
+        } else {
+            if self.executors.len() != self.batch.len() {
+                return Err(anyhow::anyhow!("local pipeline executor/batch length mismatch"));
+            }
+            for (executor, (_, index_pos, block_idx)) in self.executors.iter().zip(self.batch.iter()) {
+                self.x = executor.forward(&self.x, *index_pos, *block_idx, &mut self.cache).await?;
+            }
+        }
+        Ok(PipelineStageOutput { x: self.x, cache: self.cache })
+    }
+}
+
 /// 一个模型必须实现这个trait,才能被dial使用.
 #[async_trait]
 /// 定义公共trait.
@@ -68,6 +106,12 @@ pub trait Generator {
     }
     fn pipeline_stage_executor(&self, _stage: usize) -> Result<Arc<dyn Forwarder>> {
         Err(anyhow::anyhow!("{} does not expose shared pipeline stage executors", Self::MODEL_NAME))
+    }
+    fn pipeline_detach_stage(&self, _stage: usize, _state: &mut Box<dyn std::any::Any + Send>) -> Result<PipelineStageJob> {
+        Err(anyhow::anyhow!("{} does not support detached pipeline stages", Self::MODEL_NAME))
+    }
+    fn pipeline_attach_stage(&self, _state: &mut Box<dyn std::any::Any + Send>, _output: PipelineStageOutput) -> Result<()> {
+        Err(anyhow::anyhow!("{} does not support detached pipeline stages", Self::MODEL_NAME))
     }
     async fn pipeline_stage(&self, _stage: usize, _state: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
         Err(anyhow::anyhow!("{} does not support stage pipeline", Self::MODEL_NAME))
