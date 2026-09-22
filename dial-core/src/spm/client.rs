@@ -194,6 +194,7 @@ impl Client {
         match message {
             Message::Hello => "hello".to_string(),
             Message::WorkerInfo(_) => "worker_info".to_string(),
+            Message::ReleaseSession { session_id } => format!("release_session session={}", session_id),
             Message::SingleOp {
                 session_id,
                 layer_name,
@@ -329,6 +330,17 @@ impl Client {
         let connection = Arc::new(AsyncMutex::new(ClientConnection { stream, request_seq: 0 }));
         let mut lanes = self.session_connections.lock().await;
         Ok(lanes.entry(session_id).or_insert_with(|| connection.clone()).clone())
+    }
+
+    pub async fn release_session(&self, session_id: SessionId) {
+        if session_id == 0 { return; }
+        let lane = { self.session_connections.lock().await.remove(&session_id) };
+        if let Some(lane) = lane {
+            let mut connection = lane.lock().await;
+            if Message::ReleaseSession { session_id }.to_writer(&mut connection.stream).await.is_ok() {
+                let _ = Message::from_reader(&mut connection.stream).await;
+            }
+        }
     }
 
     /// Send a Message to the worker and return a response.
