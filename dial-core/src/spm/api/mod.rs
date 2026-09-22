@@ -438,7 +438,12 @@ where
                     if let Ok(j) = serde_json::to_string(&final_chunk) { let _ = tx.send(format!("data: {j}\\n\\n")); }
                     let _ = tx.send("data: [DONE]\\n\\n".into()); break;
                 }
-                EngineEvent::Error(e) => { let _ = tx.send(format!("data: {{\\"error\\":{}}}\\n\\n", serde_json::to_string(&e).unwrap_or_else(|_| "\\"generation error\\"".into()))); let _ = tx.send("data: [DONE]\\n\\n".into()); break; }
+                EngineEvent::Error(e) => {
+                    let payload = serde_json::json!({ "error": e }).to_string();
+                    let _ = tx.send(format!("data: {payload}\\n\\n"));
+                    let _ = tx.send("data: [DONE]\\n\\n".into());
+                    break;
+                }
             }
         }
     });
