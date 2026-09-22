@@ -28,9 +28,26 @@ where F: std::future::Future {
     REMOTE_PROFILE.scope(profile, future).await
 }
 
-fn update_distributed_profile(update: impl FnOnce(&mut DistributedProfile)) {
-    if REMOTE_PROFILE.try_with(|p| { if let Ok(mut p) = p.lock() { update(&mut p); true } else { false } }).unwrap_or(false) { return; }
-    if let Ok(mut p) = distributed_profile().lock() { update(&mut p); }
+fn update_distributed_profile<F>(update: F)
+where
+    F: Fn(&mut DistributedProfile),
+{
+    if REMOTE_PROFILE
+        .try_with(|p| {
+            if let Ok(mut p) = p.lock() {
+                update(&mut p);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if let Ok(mut p) = distributed_profile().lock() {
+        update(&mut p);
+    }
 }
 
 fn current_session_id() -> SessionId {
