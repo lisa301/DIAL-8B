@@ -19,7 +19,7 @@ use crate::models::chat::Message;
 use crate::models::Generator;
 
 use super::worker::collect_worker_metrics;
-use super::{configured_pipeline_depth, probe_worker, snapshot_distributed_profile, EngineEvent, EngineRequest, Master, PipelineEngine, Topology};
+use super::{configured_pipeline_depth, probe_worker, EngineEvent, EngineRequest, Master, PipelineEngine, Topology, Context};
 
 #[derive(Deserialize)]
 struct Request {
@@ -162,10 +162,7 @@ struct TopologyStatus {
     workers: Vec<WorkerStatus>,
 }
 
-async fn topology<G>(state: web::Data<Arc<RwLock<Master<G>>>>) -> impl Responder
-where
-    G: Generator + Send + Sync + 'static,
-{
+async fn topology(state: web::Data<Context>) -> impl Responder {
     let (
         master_api,
         topology_path,
@@ -174,20 +171,19 @@ where
         master_device,
         master_device_idx,
     ) = {
-        let master = state.read().await;
         (
-            master.ctx.args.api.clone().unwrap_or_default(),
-            master.ctx.args.topology.clone(),
-            master.ctx.topology.clone(),
-            format!("{:?}", master.ctx.dtype),
-            if master.ctx.device.is_cuda() {
+            state.args.api.clone().unwrap_or_default(),
+            state.args.topology.clone(),
+            state.topology.clone(),
+            format!("{:?}", state.dtype),
+            if state.device.is_cuda() {
                 "cuda".to_string()
             } else if master.ctx.device.is_metal() {
                 "metal".to_string()
             } else {
                 "cpu".to_string()
             },
-            master.ctx.args.device,
+            state.args.device,
         )
     };
     let master_metrics = collect_worker_metrics(master_device_idx);
@@ -495,10 +491,7 @@ where
 
     log::info!("starting api on http://{} ...", &address);
 
-    let topology_state = Arc::new(RwLock::new(master));
-    // The pipeline engine becomes the sole mutable model owner. HTTP requests only
-    // submit work and await per-session events; they never hold the model lock.
-    let master = Arc::try_unwrap(topology_state).ok().expect("master state must be unique").into_inner();
+    // Topology is immutable runtime metadata and does not need ownership of the model.
     let topology_snapshot = master.ctx.clone();
     let (engine_tx, engine) = PipelineEngine::channel(master, configured_pipeline_depth());
     tokio::spawn(engine.run());
@@ -507,6 +500,7 @@ where
         move || {
             App::new()
                 .app_data(web::Data::new(engine_tx.clone()))
+                .app_data(web::Data::new(topology_snapshot.clone()))
                 .app_data(web::JsonConfig::default().limit(json_limit))
                 .route("/", web::get().to(web_chat))
                 .route("/chat", web::get().to(web_chat))
@@ -514,7 +508,7 @@ where
                 .route("/web-chat/styles.css", web::get().to(web_chat_styles))
                 .route("/web-chat/app.js", web::get().to(web_chat_script))
                 .route("/api/v1/chat/completions", web::post().to(chat::<G>))
-                // topology endpoint is temporarily detached from mutable model ownership during pipeline execution
+                .route("/api/v1/topology", web::get().to(topology))
                 .default_service(web::route().to(not_found))
         }, //.wrap(actix_web::middleware::Logger::default()))
     )
