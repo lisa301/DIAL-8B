@@ -574,6 +574,11 @@ impl super::Forwarder for Client {
             .await
     }
 
+    async fn release_remote_session(&self, session_id: SessionId) -> Result<()> {
+        Client::release_session(self, session_id).await;
+        Ok(())
+    }
+
     // 返回客户端的唯一身份标识=服务器地址
     fn ident(&self) -> &str {
         &self.address
