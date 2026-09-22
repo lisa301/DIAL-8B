@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::oneshot;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -18,7 +19,7 @@ use crate::models::chat::Message;
 use crate::models::Generator;
 
 use super::worker::collect_worker_metrics;
-use super::{probe_worker, snapshot_distributed_profile, Master, Topology};
+use super::{configured_pipeline_depth, probe_worker, snapshot_distributed_profile, EngineEvent, EngineRequest, Master, PipelineEngine, Topology};
 
 #[derive(Deserialize)]
 struct Request {
@@ -389,324 +390,62 @@ impl Response {
 }
 
 async fn chat<G>(
-    state: web::Data<Arc<RwLock<Master<G>>>>,
-    req: HttpRequest,
-    messages: web::Json<Request>,
+    engine: web::Data<mpsc::UnboundedSender<EngineRequest>>,
+    _req: HttpRequest,
+    body: web::Json<Request>,
 ) -> impl Responder
 where
     G: Generator + Send + Sync + 'static,
 {
-    let client = req
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
-
-    log::info!("starting chat for {} ...", &client);
-
-    let Request { messages, stream } = messages.into_inner();
+    let Request { messages, stream } = body.into_inner();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    if engine.send(EngineRequest { messages, events: event_tx, accepted: accepted_tx }).is_err() {
+        return HttpResponse::ServiceUnavailable().body("pipeline engine is not running");
+    }
+    let session_id = match accepted_rx.await {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::InternalServerError().body("pipeline admission failed"),
+    };
 
     if !stream {
-        let session_id = uuid::Uuid::new_v4().as_u128() as u64;
-        let mut master = state.write().await;
-
-        if let Err(e) = master.reset() {
-            log::error!("reset failed for {}: {}", &client, &e);
-            return HttpResponse::InternalServerError().body(format!("reset failed: {e}"));
-        }
-
-        for message in messages {
-            if let Err(e) = master.model.add_message(message) {
-                log::warn!("invalid message from {}: {}", &client, &e);
-                return HttpResponse::BadRequest().body(format!("invalid message: {e}"));
-            }
-        }
-
-        let mut resp = String::new();
         let start = Instant::now();
-        let mut ttft_s: Option<f64> = None;
-
-        let mut generated_tokens: usize = 0;
-
-        if let Err(e) = master
-            .generate_with_session(session_id, |data| {
-                // 记录首 token 时间（只要收到第一个非空 chunk，就认为首 token 已产生）。
-                if ttft_s.is_none() && !data.is_empty() {
-                    ttft_s = Some(start.elapsed().as_secs_f64());
+        let mut text = String::new();
+        let mut ttft_s = None;
+        let mut generated = 0usize;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                EngineEvent::Token(token) => { if ttft_s.is_none() { ttft_s = Some(start.elapsed().as_secs_f64()); } generated += 1; text.push_str(&token); }
+                EngineEvent::Finished { generated_tokens, elapsed_s } => {
+                    let total_s = elapsed_s;
+                    let tps = if total_s > 0.0 { Some(generated_tokens as f64 / total_s) } else { None };
+                    let decode_tps = ttft_s.and_then(|ttft| { let dt = total_s - ttft; if generated_tokens > 1 && dt > 0.0 { Some((generated_tokens - 1) as f64 / dt) } else { None } });
+                    return HttpResponse::Ok().json(Response::from_assistant_response(G::MODEL_NAME.to_string(), text, ttft_s, total_s, tps, decode_tps, generated, None, None, None));
                 }
-                generated_tokens += 1;
-                resp += data;
-            })
-            .await
-        {
-            log::error!("generation failed for {}: {}", &client, &e);
-            return HttpResponse::InternalServerError().body(format!("generation failed: {e}"));
+                EngineEvent::Error(e) => return HttpResponse::InternalServerError().body(e),
+            }
         }
-
-        let total_s = start.elapsed().as_secs_f64();
-        let tokens_per_second = if total_s > 0.0 {
-            Some(generated_tokens as f64 / total_s)
-        } else {
-            None
-        };
-        let decode_tokens_per_second = match ttft_s {
-            Some(ttft) if total_s > ttft && generated_tokens > 1 => {
-                let decode_tokens = generated_tokens.saturating_sub(1) as f64;
-                let decode_s = total_s - ttft;
-                if decode_s > 0.0 {
-                    Some(decode_tokens / decode_s)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        let dist = snapshot_distributed_profile();
-        let response = Response::from_assistant_response(
-            G::MODEL_NAME.to_string(),
-            resp,
-            ttft_s,
-            total_s,
-            tokens_per_second,
-            decode_tokens_per_second,
-            generated_tokens,
-            Some(dist.distributed_overhead_s()),
-            Some(dist.remote_compute_s),
-            Some(dist.remote_requests),
-        );
-
-        // （新增）服务端日志也打印一份，方便不看 JSON 的情况下观察首 token 与总耗时。
-        log::info!(
-            "metrics for {}: ttft_s={} total_s={:.3} tps={} decode_tps={} dist_overhead_s={:.3} remote_compute_s={:.3} remote_requests={}",
-            &client,
-            ttft_s
-                .map(|v| format!("{v:.3}"))
-                .unwrap_or_else(|| "null".to_string()),
-            total_s,
-            tokens_per_second
-                .map(|v| format!("{v:.3}"))
-                .unwrap_or_else(|| "null".to_string()),
-            decode_tokens_per_second
-                .map(|v| format!("{v:.3}"))
-                .unwrap_or_else(|| "null".to_string()),
-            dist.distributed_overhead_s(),
-            dist.remote_compute_s,
-            dist.remote_requests
-        );
-        log::info!(
-            "distributed transfer for {}: write_s={:.3} read_s={:.3} write_bytes={} read_bytes={} avg_write_kb={:.2} avg_read_kb={:.2}",
-            &client,
-            dist.remote_write_s,
-            dist.remote_read_s,
-            dist.remote_write_bytes,
-            dist.remote_read_bytes,
-            if dist.remote_requests > 0 {
-                dist.remote_write_bytes as f64 / dist.remote_requests as f64 / 1024.0
-            } else {
-                0.0
-            },
-            if dist.remote_requests > 0 {
-                dist.remote_read_bytes as f64 / dist.remote_requests as f64 / 1024.0
-            } else {
-                0.0
-            }
-        );
-
-        return HttpResponse::Ok().json(response);
+        return HttpResponse::InternalServerError().body(format!("pipeline session {session_id} closed unexpectedly"));
     }
 
-    // Streaming mode (SSE). Server does not print tokens; client renders them as they arrive.
     let (tx, rx) = mpsc::unbounded_channel::<String>();
-    let state = state.clone();
-    let client_for_task = client.clone();
     let model = G::MODEL_NAME.to_string();
-
     tokio::spawn(async move {
-        let send = |tx: &mpsc::UnboundedSender<String>, payload: &str| {
-            let _ = tx.send(payload.to_string());
-        };
-
-        let id = uuid::Uuid::new_v4().to_string();
-        let created = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let session_id = uuid::Uuid::new_v4().as_u128() as u64;
-
-        let mut master = state.write().await;
-
-        if let Err(e) = master.reset() {
-            log::error!("reset failed for {}: {}", &client_for_task, &e);
-            let j = serde_json::json!({ "error": format!("reset failed: {e}") }).to_string();
-            send(&tx, &format!("data: {j}\n\n"));
-            send(&tx, "data: [DONE]\n\n");
-            return;
-        }
-
-        for message in messages {
-            if let Err(e) = master.model.add_message(message) {
-                log::warn!("invalid message from {}: {}", &client_for_task, &e);
-                let j = serde_json::json!({ "error": format!("invalid message: {e}") }).to_string();
-                send(&tx, &format!("data: {j}\n\n"));
-                send(&tx, "data: [DONE]\n\n");
-                return;
+        let id = format!("dial-{session_id}");
+        let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                EngineEvent::Token(token) => {
+                    let chunk = StreamResponse { id: id.clone(), object: "chat.completion.chunk".into(), created, model: model.clone(), choices: vec![StreamChoice { index: 0, delta: StreamDelta { content: Some(token) }, finish_reason: None }], ttft_s: None, total_s: None, tokens_per_second: None, decode_tokens_per_second: None, generated_tokens: None, distributed_overhead_s: None, remote_compute_s: None, remote_requests: None };
+                    if let Ok(j) = serde_json::to_string(&chunk) { let _ = tx.send(format!("data: {j}\\n\\n")); }
+                }
+                EngineEvent::Finished { .. } => { let _ = tx.send("data: [DONE]\\n\\n".into()); break; }
+                EngineEvent::Error(e) => { let _ = tx.send(format!("data: {{\\"error\\":{}}}\\n\\n", serde_json::to_string(&e).unwrap_or_else(|_| "\\"generation error\\"".into()))); let _ = tx.send("data: [DONE]\\n\\n".into()); break; }
             }
         }
-
-        let mut resp = String::new();
-        let start = Instant::now();
-        let mut ttft_s: Option<f64> = None;
-        let mut generated_tokens: usize = 0;
-
-        let gen = master
-            .generate_with_session(session_id, |data| {
-                // End-of-stream marker from Master::generate.
-                if data.is_empty() {
-                    return;
-                }
-
-                if ttft_s.is_none() {
-                    ttft_s = Some(start.elapsed().as_secs_f64());
-                }
-
-                resp.push_str(data);
-                generated_tokens += 1;
-
-                let chunk = StreamResponse {
-                    id: id.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model.clone(),
-                    choices: vec![StreamChoice {
-                        index: 0,
-                        delta: StreamDelta {
-                            content: Some(data.to_string()),
-                        },
-                        finish_reason: None,
-                    }],
-                    ttft_s: None,
-                    total_s: None,
-                    tokens_per_second: None,
-                    decode_tokens_per_second: None,
-                    generated_tokens: None,
-                    distributed_overhead_s: None,
-                    remote_compute_s: None,
-                    remote_requests: None,
-                };
-
-                match serde_json::to_string(&chunk) {
-                    Ok(j) => send(&tx, &format!("data: {j}\n\n")),
-                    Err(e) => {
-                        log::error!("failed to serialize stream chunk: {e}");
-                        send(
-                            &tx,
-                            "data: {\"error\":\"internal serialization error\"}\n\n",
-                        );
-                    }
-                }
-            })
-            .await;
-
-        match gen {
-            Ok(()) => {
-                let total_s = start.elapsed().as_secs_f64();
-                let tokens_per_second = if total_s > 0.0 {
-                    Some(generated_tokens as f64 / total_s)
-                } else {
-                    None
-                };
-                let decode_tokens_per_second = match ttft_s {
-                    Some(ttft) if total_s > ttft && generated_tokens > 1 => {
-                        let decode_tokens = generated_tokens.saturating_sub(1) as f64;
-                        let decode_s = total_s - ttft;
-                        if decode_s > 0.0 {
-                            Some(decode_tokens / decode_s)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                let dist = snapshot_distributed_profile();
-                let final_chunk = StreamResponse {
-                    id: id.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model.clone(),
-                    choices: vec![StreamChoice {
-                        index: 0,
-                        delta: StreamDelta { content: None },
-                        finish_reason: Some("stop".to_string()),
-                    }],
-                    ttft_s,
-                    total_s: Some(total_s),
-                    tokens_per_second,
-                    decode_tokens_per_second,
-                    generated_tokens: Some(generated_tokens),
-                    distributed_overhead_s: Some(dist.distributed_overhead_s()),
-                    remote_compute_s: Some(dist.remote_compute_s),
-                    remote_requests: Some(dist.remote_requests),
-                };
-                if let Ok(j) = serde_json::to_string(&final_chunk) {
-                    send(&tx, &format!("data: {j}\n\n"));
-                }
-
-                log::info!(
-                    "metrics for {}: ttft_s={} total_s={:.3} tps={} decode_tps={} dist_overhead_s={:.3} remote_compute_s={:.3} remote_requests={}",
-                    &client_for_task,
-                    ttft_s
-                        .map(|v| format!("{v:.3}"))
-                        .unwrap_or_else(|| "null".to_string()),
-                    total_s,
-                    tokens_per_second
-                        .map(|v| format!("{v:.3}"))
-                        .unwrap_or_else(|| "null".to_string()),
-                    decode_tokens_per_second
-                        .map(|v| format!("{v:.3}"))
-                        .unwrap_or_else(|| "null".to_string()),
-                    dist.distributed_overhead_s(),
-                    dist.remote_compute_s,
-                    dist.remote_requests
-                );
-                log::info!(
-                    "distributed transfer for {}: write_s={:.3} read_s={:.3} write_bytes={} read_bytes={} avg_write_kb={:.2} avg_read_kb={:.2}",
-                    &client_for_task,
-                    dist.remote_write_s,
-                    dist.remote_read_s,
-                    dist.remote_write_bytes,
-                    dist.remote_read_bytes,
-                    if dist.remote_requests > 0 {
-                        dist.remote_write_bytes as f64 / dist.remote_requests as f64 / 1024.0
-                    } else {
-                        0.0
-                    },
-                    if dist.remote_requests > 0 {
-                        dist.remote_read_bytes as f64 / dist.remote_requests as f64 / 1024.0
-                    } else {
-                        0.0
-                    }
-                );
-            }
-            Err(e) => {
-                log::error!("generation failed for {}: {}", &client_for_task, &e);
-                let j =
-                    serde_json::json!({ "error": format!("generation failed: {e}") }).to_string();
-                send(&tx, &format!("data: {j}\n\n"));
-            }
-        }
-
-        send(&tx, "data: [DONE]\n\n");
     });
-
-    let body = UnboundedReceiverStream::new(rx)
-        .map(|s| Ok::<web::Bytes, actix_web::Error>(web::Bytes::from(s)));
-
-    HttpResponse::Ok()
-        .insert_header(("Content-Type", "text/event-stream"))
-        .insert_header(("Cache-Control", "no-cache"))
-        .insert_header(("Connection", "keep-alive"))
-        .insert_header(("X-DIAL-Model", G::MODEL_NAME))
-        .streaming(body)
+    let body = UnboundedReceiverStream::new(rx).map(|s| Ok::<web::Bytes, actix_web::Error>(web::Bytes::from(s)));
+    HttpResponse::Ok().insert_header(("Content-Type", "text/event-stream")).insert_header(("Cache-Control", "no-cache")).insert_header(("X-DIAL-Session", session_id.to_string())).streaming(body)
 }
 
 async fn not_found() -> actix_web::Result<HttpResponse> {
@@ -756,12 +495,18 @@ where
 
     log::info!("starting api on http://{} ...", &address);
 
-    let state = Arc::new(RwLock::new(master));
+    let topology_state = Arc::new(RwLock::new(master));
+    // The pipeline engine becomes the sole mutable model owner. HTTP requests only
+    // submit work and await per-session events; they never hold the model lock.
+    let master = Arc::try_unwrap(topology_state).ok().expect("master state must be unique").into_inner();
+    let topology_snapshot = master.ctx.clone();
+    let (engine_tx, engine) = PipelineEngine::channel(master, configured_pipeline_depth());
+    tokio::spawn(engine.run());
 
     HttpServer::new(
         move || {
             App::new()
-                .app_data(web::Data::new(state.clone()))
+                .app_data(web::Data::new(engine_tx.clone()))
                 .app_data(web::JsonConfig::default().limit(json_limit))
                 .route("/", web::get().to(web_chat))
                 .route("/chat", web::get().to(web_chat))
@@ -769,7 +514,7 @@ where
                 .route("/web-chat/styles.css", web::get().to(web_chat_styles))
                 .route("/web-chat/app.js", web::get().to(web_chat_script))
                 .route("/api/v1/chat/completions", web::post().to(chat::<G>))
-                .route("/api/v1/topology", web::get().to(topology::<G>))
+                // topology endpoint is temporarily detached from mutable model ownership during pipeline execution
                 .default_service(web::route().to(not_found))
         }, //.wrap(actix_web::middleware::Logger::default()))
     )
