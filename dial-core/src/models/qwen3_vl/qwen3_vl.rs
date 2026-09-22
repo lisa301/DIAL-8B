@@ -3482,18 +3482,32 @@ impl Generator for Qwen3Vl {
     }
 
     async fn pipeline_prepare(&mut self, index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> {
-        // Keep the multimodal/full-context prefill on the mature path.  The detached
-        // stage pipeline is used for decode steps, where context_size == 1 and there
-        // are no image/deepstack mutations between transformer layers.
-        if index == 0 || self.generated == 0 {
+        // Preserve the specialized RKNN text path when explicitly configured.
+        if self.text_rknn_dir.is_some()
+            && (self.ctx.args.text_rknn_prefill || self.text_decode_mode.allows_text_rknn_decode())
+        {
             return Ok(None);
         }
+
+        // Multimodal prefill still needs per-layer DeepStack injection and remains
+        // on the mature monolithic path. Pure-text prefill can be pipelined safely.
+        if self.generated == 0 {
+            if self.history.iter().any(Message::is_multimodal) {
+                return Ok(None);
+            }
+            self.start_dialog_prompt()?;
+        }
+
         let num_tokens = self.tokens.len();
-        let context_size = if self.ctx.cache.with_kv_cache() { 1 } else { num_tokens };
-        if context_size != 1 {
+        let (context_size, context_index) = if self.ctx.cache.with_kv_cache() && index > 0 {
+            (1, self.index_pos)
+        } else {
+            (num_tokens, 0)
+        };
+        if context_size == 0 {
             return Ok(None);
         }
-        let context_index = self.index_pos;
+
         let context_offset = num_tokens.saturating_sub(context_size);
         let input_ids = Tensor::new(&self.tokens[context_offset..], &self.ctx.device)?.unsqueeze(0)?;
         let x = self.embedding.forward(&input_ids)?;
