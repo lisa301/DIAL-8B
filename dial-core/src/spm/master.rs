@@ -2,7 +2,7 @@ use std::io::Write;
 
 use crate::models::{chat::Message, Generator};
 
-use super::{api, reset_distributed_profile, Context};
+use super::{api, reset_distributed_profile, with_remote_session, Context, SessionId};
 
 use anyhow::Result;
 
@@ -32,7 +32,7 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
                 .add_message(Message::user(self.ctx.args.prompt.clone()))?;
 
             // 生成回复并输出到终端
-            self.generate(|data| {
+            self.generate_with_session(0, |data| {
                 if data.is_empty() {
                     println!();
                 } else {
@@ -53,7 +53,16 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
     }
 
     /// 逐一生成token，并通过stream函数实时输出。
-    pub async fn generate<S>(&mut self, mut stream: S) -> Result<()>
+    pub async fn generate<S>(&mut self, stream: S) -> Result<()>
+    where
+        S: FnMut(&str),
+    {
+        self.generate_with_session(0, stream).await
+    }
+
+    /// Generate one request under a stable distributed session id so worker KV caches
+    /// remain isolated when multiple requests are interleaved on the same connections.
+    pub async fn generate_with_session<S>(&mut self, session_id: SessionId, mut stream: S) -> Result<()>
     where
         S: FnMut(&str),
     {
@@ -75,7 +84,7 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
                 start_gen = std::time::Instant::now()
             }
             /// 生成下一个词/字
-            let token = self.model.next_token(index).await?;
+            let token = with_remote_session(session_id, self.model.next_token(index)).await?;
             /// 如果生成结束，停止循环；否则把生成的token实时输出。
             if token.is_end_of_stream {
                 break;
