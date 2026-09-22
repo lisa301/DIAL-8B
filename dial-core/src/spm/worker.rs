@@ -673,6 +673,11 @@ impl<G: Generator + 'static> Worker<G> {
         while let Ok((read_time, read_size, op_message)) =
             Self::read_message_timed(&mut socket).await
         {
+            if let Message::ReleaseSession { session_id } = op_message {
+                session_caches.remove(&session_id);
+                Self::write_message_timed(&mut socket, Message::ReleaseSession { session_id }).await?;
+                continue;
+            }
             // Status probes stop after the Hello handshake. Allocate a fresh
             // KV cache only when this connection sends its first inference op.
             let context = client_context.get_or_insert_with(|| base_context.get_client_context());
