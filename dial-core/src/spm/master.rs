@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{collections::HashMap, io::Write};
 
 use crate::models::{chat::Message, Generator};
 
@@ -10,6 +10,7 @@ use anyhow::Result;
 pub struct Master<G> {
     pub ctx: Context,
     pub model: Box<G>,
+    sessions: HashMap<SessionId, Box<dyn std::any::Any + Send>>,
 }
 
 //给泛型Master结构体实现方法
@@ -17,7 +18,7 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
     /// 异步创建并初始化Master主节点。
     pub async fn new(ctx: Context) -> Result<Self> {
         let model = G::load(ctx.clone()).await?;
-        Ok(Self { ctx, model })
+        Ok(Self { ctx, model, sessions: HashMap::new() })
     }
     // 整个程序的入口
     pub async fn run(mut self) -> Result<()> {
@@ -51,6 +52,29 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         reset_distributed_profile();
         self.model.reset()
     }
+
+    /// Create an isolated request context while retaining the single shared model weights.
+    pub fn create_session(&mut self, session_id: SessionId, messages: Vec<Message>) -> Result<()> {
+        self.model.reset()?;
+        for message in messages { self.model.add_message(message)?; }
+        let state = self.model.save_session()?.ok_or_else(|| anyhow::anyhow!("{} does not support pipeline sessions", G::MODEL_NAME))?;
+        self.sessions.insert(session_id, state);
+        Ok(())
+    }
+
+    /// Execute exactly one autoregressive step for a session. This is the scheduling
+    /// primitive used to interleave A/B/C instead of running A to completion first.
+    pub async fn step_session(&mut self, session_id: SessionId, index: usize) -> Result<crate::models::Token> {
+        let state = self.sessions.remove(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown pipeline session {session_id}"))?;
+        self.model.restore_session(state)?;
+        let result = with_remote_session(session_id, self.model.next_token(index)).await;
+        let saved = self.model.save_session()?;
+        if let Some(state) = saved { self.sessions.insert(session_id, state); }
+        result
+    }
+
+    pub fn release_session(&mut self, session_id: SessionId) { self.sessions.remove(&session_id); }
 
     /// 逐一生成token，并通过stream函数实时输出。
     pub async fn generate<S>(&mut self, stream: S) -> Result<()>
