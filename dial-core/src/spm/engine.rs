@@ -96,6 +96,13 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         self.ready.len() + self.in_flight.len()
     }
 
+    fn trace_enabled() -> bool {
+        matches!(
+            std::env::var("DIAL_PIPELINE_TRACE").ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+        )
+    }
+
     async fn admit(&mut self, request: EngineRequest) {
         let id = self.next_session;
         self.next_session = self.next_session.wrapping_add(1).max(1);
@@ -161,6 +168,15 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                 };
                 match attach_result {
                     Ok(()) => {
+                        if Self::trace_enabled() {
+                            log::info!(
+                                "[pipeline] complete session={} step={} stage={} elapsed_ms={:.3}",
+                                request.session_id,
+                                request.step,
+                                request.stage,
+                                request.started.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
                         request.stage += 1;
                         self.ready.push_back(request);
                     }
@@ -290,6 +306,16 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         let slot = self.stage_slots[request.stage].clone();
         let session_id = request.session_id;
         let profile = request.profile.clone();
+
+        if Self::trace_enabled() {
+            log::info!(
+                "[pipeline] launch session={} step={} stage={} elapsed_ms={:.3}",
+                request.session_id,
+                request.step,
+                request.stage,
+                request.started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
         self.in_flight.spawn(async move {
             let result = async {
