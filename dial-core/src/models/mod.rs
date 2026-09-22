@@ -63,6 +63,9 @@ pub trait Generator {
     /// Stage-split execution hooks. Models may expose a prepared hidden state and
     /// advance it one owner-contiguous stage at a time. Defaults preserve legacy behavior.
     async fn pipeline_prepare(&mut self, _index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> { Ok(None) }
+    fn pipeline_stage_batch(&self, _stage: usize, _index_pos: usize) -> Result<Vec<(String, usize, usize)>> {
+        Err(anyhow::anyhow!("{} does not expose pipeline stage batches", Self::MODEL_NAME))
+    }
     fn pipeline_stage_executor(&self, _stage: usize) -> Result<Arc<dyn Forwarder>> {
         Err(anyhow::anyhow!("{} does not expose shared pipeline stage executors", Self::MODEL_NAME))
     }
