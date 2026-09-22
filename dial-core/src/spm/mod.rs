@@ -289,6 +289,12 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         Ok(())
     }
 
+    /// True when this executor's output contract requires sampling metadata
+    /// and may return a sampled token instead of a hidden activation.
+    fn requires_remote_sampling(&self) -> bool {
+        false
+    }
+
     /// Optional fused local execution. None retains the legacy per-layer path.
     /// Implementations must validate the full batch before modifying any cache.
     fn forward_local_batch(
