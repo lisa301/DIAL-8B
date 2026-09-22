@@ -3600,23 +3600,17 @@ impl Generator for Qwen3Vl {
         Ok(Token { id: next_token, text, is_end_of_stream: Some(next_token) == self.eos_token_id })
     }
 
-    async fn release_pipeline_session(&self, session_id: crate::spm::SessionId) -> Result<()> {
+    fn pipeline_release_handles(&self) -> Vec<Arc<dyn Forwarder>> {
         let mut released = std::collections::HashSet::new();
-        let mut errors = Vec::new();
+        let mut handles = Vec::new();
         for block in &self.blocks {
             let ident = block.ident().to_string();
-            if ident == "local" || !released.insert(ident.clone()) {
+            if ident == "local" || !released.insert(ident) {
                 continue;
             }
-            if let Err(e) = block.release_remote_session(session_id).await {
-                errors.push(format!("{}: {}", ident, e));
-            }
+            handles.push(block.clone());
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!("failed to release pipeline session {} on {}", session_id, errors.join("; ")))
-        }
+        handles
     }
 
     fn generated_tokens(&self) -> usize {
