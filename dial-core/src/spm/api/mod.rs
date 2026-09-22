@@ -406,6 +406,8 @@ where
     let Request { messages, stream } = messages.into_inner();
 
     if !stream {
+        let session_id = uuid::Uuid::new_v4().as_u128() as u64;
+        let session_id = uuid::Uuid::new_v4().as_u128() as u64;
         let mut master = state.write().await;
 
         if let Err(e) = master.reset() {
@@ -427,7 +429,7 @@ where
         let mut generated_tokens: usize = 0;
 
         if let Err(e) = master
-            .generate(|data| {
+            .generate_with_session(session_id, |data| {
                 // 记录首 token 时间（只要收到第一个非空 chunk，就认为首 token 已产生）。
                 if ttft_s.is_none() && !data.is_empty() {
                     ttft_s = Some(start.elapsed().as_secs_f64());
