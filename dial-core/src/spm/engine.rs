@@ -86,7 +86,8 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                 match result {
                     Ok(token) if token.is_end_of_stream => {
                         master.release_session(request.session_id);
-                        let _ = request.events.send(EngineEvent::Finished { generated_tokens: request.generated, elapsed_s: request.started.elapsed().as_secs_f64() });
+                        let profile = request.profile.lock().map(|p| p.clone()).unwrap_or_default();
+                        let _ = request.events.send(EngineEvent::Finished { generated_tokens: request.generated, elapsed_s: request.started.elapsed().as_secs_f64(), profile });
                     }
                     Ok(token) => {
                         request.generated += 1;
