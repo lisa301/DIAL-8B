@@ -2190,7 +2190,7 @@ impl Qwen3Vl {
                 let last = block_idx.saturating_sub(1);
                 let num_remote_layers = last.saturating_sub(first) + 1;
                 x = self.blocks[first]
-                    .forward_batch(&x, batch, &mut self.ctx.cache)
+                    .forward_batch_shared(&x, batch, &mut self.ctx.cache)
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward batch operation for block {block_idx}: {e}")
