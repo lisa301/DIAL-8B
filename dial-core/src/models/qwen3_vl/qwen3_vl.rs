@@ -1095,6 +1095,16 @@ struct Qwen3VlSessionState {
     fast_logits_processor: FastLogitsProcessor,
 }
 
+struct PipelineHiddenState {
+    x: Tensor,
+    index: usize,
+    context_index: usize,
+    num_context_tokens: usize,
+    num_tokens_before: usize,
+    inject_images: bool,
+    stage_ranges: Vec<(usize, usize)>,
+}
+
 pub struct Qwen3Vl {
     ctx: Context,
 
@@ -1254,6 +1264,20 @@ impl TextStepProfile {
 }
 
 impl Qwen3Vl {
+    fn pipeline_ranges(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut first = 0usize;
+        while first < self.blocks.len() {
+            let ident = self.blocks[first].ident().to_string();
+            let mut end = first + 1;
+            while end < self.blocks.len() && self.blocks[end].ident() == ident { end += 1; }
+            out.push((first, end));
+            first = end;
+        }
+        out
+    }
+
+
     const TEXT_RKNN_MIN_HEADROOM: usize = 64;
     const TEXT_RKNN_PREFIX_MAX_ABS_THRESHOLD: f32 = 1e-2;
     const TEXT_RKNN_PREFIX_RMS_THRESHOLD: f32 = 1e-3;
@@ -3441,6 +3465,54 @@ impl Generator for Qwen3Vl {
             text,
             is_end_of_stream: Some(next_token) == self.eos_token_id,
         })
+    }
+
+    fn pipeline_stage_count(&self) -> usize { self.pipeline_ranges().len() }
+
+    async fn pipeline_prepare(&mut self, index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+        if self.generated == 0 { self.start_dialog_prompt()?; }
+        let num_tokens = self.tokens.len();
+        let (context_size, context_index) = if self.ctx.cache.with_kv_cache() && index > 0 { (1, self.index_pos) } else { (num_tokens, 0) };
+        let context_offset = num_tokens.saturating_sub(context_size);
+        let input_ids = Tensor::new(&self.tokens[context_offset..], &self.ctx.device)?.unsqueeze(0)?;
+        let mut x = self.embedding.forward(&input_ids)?;
+        let inject_images = self.index_pos == 0 && context_index == 0 && context_size == num_tokens;
+        if inject_images && !self.image_spans.is_empty() { x = self.inject_image_embeddings(&x)?; }
+        Ok(Some(Box::new(PipelineHiddenState { x, index, context_index, num_context_tokens: context_size, num_tokens_before: num_tokens, inject_images, stage_ranges: self.pipeline_ranges() })))
+    }
+
+    async fn pipeline_stage(&self, stage: usize, state: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
+        let mut state = *state.downcast::<PipelineHiddenState>().map_err(|_| anyhow!("invalid qwen3-vl pipeline hidden state"))?;
+        let (first, end) = *state.stage_ranges.get(stage).ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
+        // Stage-local KV is carried by the logical session on workers. Local layers still
+        // use the session cache restored by the engine before preparation/finalization.
+        let mut cache = self.ctx.cache.as_new();
+        let ident = self.blocks[first].ident().to_string();
+        if ident == "local" {
+            for block_idx in first..end {
+                if state.inject_images { state.x = self.inject_deepstack_embeddings(&state.x, block_idx)?; }
+                state.x = self.blocks[block_idx].forward(&state.x, state.context_index, block_idx, &mut cache).await?;
+            }
+        } else {
+            let batch = (first..end).map(|block_idx| (self.blocks[block_idx].layer_name().to_string(), state.context_index, block_idx)).collect();
+            state.x = self.blocks[first].forward_batch_shared(&state.x, batch, &mut cache).await?;
+        }
+        Ok(Box::new(state))
+    }
+
+    async fn pipeline_finish(&mut self, state: Box<dyn std::any::Any + Send>) -> Result<Token> {
+        let state = *state.downcast::<PipelineHiddenState>().map_err(|_| anyhow!("invalid qwen3-vl pipeline hidden state"))?;
+        let seq_len = state.x.dims3()?.1;
+        let x = self.ln_f.forward(&state.x)?;
+        let x = x.i((.., seq_len - 1, ..))?;
+        let logits = self.lm_head_forward(&x)?;
+        self.index_pos += state.num_context_tokens;
+        let start_at = state.num_tokens_before.saturating_sub(self.ctx.args.repeat_last_n);
+        let next_token = self.fast_logits_processor.sample(&logits.squeeze(0)?, self.ctx.args.repeat_penalty, &self.tokens[start_at..])?;
+        self.generated += 1;
+        self.tokens.push(next_token);
+        let text = self.tokenizer.decode(&[next_token], false).ok();
+        Ok(Token { id: next_token, text, is_end_of_stream: Some(next_token) == self.eos_token_id })
     }
 
     fn generated_tokens(&self) -> usize {
