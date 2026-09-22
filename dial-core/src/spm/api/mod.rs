@@ -559,7 +559,7 @@ where
         let mut generated_tokens: usize = 0;
 
         let gen = master
-            .generate(|data| {
+            .generate_with_session(session_id, |data| {
                 // End-of-stream marker from Master::generate.
                 if data.is_empty() {
                     return;
