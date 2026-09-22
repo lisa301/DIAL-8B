@@ -27,6 +27,8 @@ struct ActiveRequest {
     started: Instant,
     events: mpsc::UnboundedSender<EngineEvent>,
     profile: Arc<StdMutex<DistributedProfile>>,
+    stage: usize,
+    hidden: Option<Box<dyn std::any::Any + Send>>,
 }
 
 /// Single model owner + request-level round-robin. The model weights remain one copy;
@@ -57,7 +59,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
             Ok(()) => {
                 drop(master);
                 let _ = request.accepted.send(id);
-                self.active.push_back(ActiveRequest { session_id: id, step: 0, generated: 0, started: Instant::now(), events: request.events, profile: Arc::new(StdMutex::new(DistributedProfile::default())) });
+                self.active.push_back(ActiveRequest { session_id: id, step: 0, generated: 0, started: Instant::now(), events: request.events, profile: Arc::new(StdMutex::new(DistributedProfile::default())), stage: 0, hidden: None });
             }
             Err(e) => { let _ = request.events.send(EngineEvent::Error(e.to_string())); }
         }
@@ -78,27 +80,38 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                     master.release_session(request.session_id);
                     let profile = request.profile.lock().map(|p| p.clone()).unwrap_or_default();
                     let _ = request.events.send(EngineEvent::Finished { generated_tokens: request.generated, elapsed_s: request.started.elapsed().as_secs_f64(), profile });
-                    drop(master);
                     continue;
                 }
                 let mut master = self.master.lock().await;
-                let result = with_remote_profile(request.profile.clone(), master.step_session(request.session_id, request.step)).await;
-                match result {
-                    Ok(token) if token.is_end_of_stream => {
+                let stages = master.pipeline_stage_count();
+                let outcome: anyhow::Result<Option<crate::models::Token>> = with_remote_profile(request.profile.clone(), async {
+                    if request.hidden.is_none() {
+                        request.hidden = Some(master.prepare_session_step(request.session_id, request.step).await?);
+                        request.stage = 0;
+                    }
+                    if request.stage < stages {
+                        let hidden = request.hidden.take().expect("pipeline hidden state");
+                        request.hidden = Some(master.run_session_stage(request.session_id, request.stage, hidden).await?);
+                        request.stage += 1;
+                        return Ok(None);
+                    }
+                    let hidden = request.hidden.take().expect("pipeline hidden state");
+                    let token = master.finish_session_step(request.session_id, hidden).await?;
+                    Ok(Some(token))
+                }).await;
+                match outcome {
+                    Ok(None) => self.active.push_back(request),
+                    Ok(Some(token)) if token.is_end_of_stream => {
                         master.release_session(request.session_id);
                         let profile = request.profile.lock().map(|p| p.clone()).unwrap_or_default();
                         let _ = request.events.send(EngineEvent::Finished { generated_tokens: request.generated, elapsed_s: request.started.elapsed().as_secs_f64(), profile });
                     }
-                    Ok(token) => {
-                        request.generated += 1;
-                        request.step += 1;
+                    Ok(Some(token)) => {
+                        request.generated += 1; request.step += 1; request.stage = 0;
                         let _ = request.events.send(EngineEvent::Token(token.to_string()));
                         self.active.push_back(request);
                     }
-                    Err(e) => {
-                        master.release_session(request.session_id);
-                        let _ = request.events.send(EngineEvent::Error(e.to_string()));
-                    }
+                    Err(e) => { master.release_session(request.session_id); let _ = request.events.send(EngineEvent::Error(e.to_string())); }
                 }
                 drop(master);
                 tokio::task::yield_now().await;
