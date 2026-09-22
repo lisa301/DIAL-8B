@@ -57,4 +57,12 @@ pub trait Generator {
     async fn next_token(&mut self, index: usize) -> Result<Token>;
     /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize;
+
+    /// Move request-local generation state out of the model. Implementations that
+    /// support pipeline concurrency override these hooks; legacy models keep the
+    /// default and remain single-session.
+    fn save_session(&mut self) -> Result<Option<Box<dyn std::any::Any + Send>>> { Ok(None) }
+    fn restore_session(&mut self, _state: Box<dyn std::any::Any + Send>) -> Result<()> {
+        Err(anyhow::anyhow!("{} does not support request session swapping", Self::MODEL_NAME))
+    }
 }
