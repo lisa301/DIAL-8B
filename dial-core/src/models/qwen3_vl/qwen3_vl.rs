@@ -1104,7 +1104,7 @@ pub struct Qwen3Vl {
     ln_f: RmsNorm,
     lm_head: Option<Linear>,
     lm_head_q8: Option<QuantizedLmHead>,
-    blocks: Vec<Box<dyn Forwarder>>,
+    blocks: Vec<Arc<dyn Forwarder>>,
     prefill_shadow_blocks: Vec<Option<Box<dyn Forwarder>>>,
     force_shadow_blocks_for_dialog: bool,
     text_rknn: Option<TextRknnRunner>,
@@ -2102,7 +2102,7 @@ impl Qwen3Vl {
                         .and_then(Option::as_mut)
                         .ok_or_else(|| anyhow!("shadow block missing for local layer {first}"))?;
                     x = shadow
-                        .forward_batch(&x, batch, &mut self.ctx.cache)
+                        .forward_batch_shared(&x, batch, &mut self.ctx.cache)
                         .await
                         .map_err(|e| {
                             anyhow!(
@@ -2133,7 +2133,7 @@ impl Qwen3Vl {
                 let summary_started = step_profile.as_ref().map(|_| Instant::now());
                 let layer_idx = block_idx;
                 x = self.blocks[block_idx]
-                    .forward_mut(&x, idx, block_idx, &mut self.ctx.cache)
+                    .forward(&x, idx, block_idx, &mut self.ctx.cache)
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
@@ -3171,7 +3171,7 @@ impl Generator for Qwen3Vl {
         };
 
         log::info!("loading {} text blocks ...", text_cfg.num_hidden_layers);
-        let mut blocks: Vec<Box<dyn Forwarder>> = vec![];
+        let mut blocks: Vec<Arc<dyn Forwarder>> = vec![];
         let shadow_host = if Self::shadow_prefill_enabled() {
             Self::shadow_prefill_host(&ctx)
         } else {
@@ -3192,13 +3192,13 @@ impl Generator for Qwen3Vl {
                 let client = worker_connections
                     .client_for_layer(ctx.device.clone(), &node.host, &block_layer_name)
                     .await?;
-                blocks.push(Box::new(client));
+                blocks.push(Arc::new(client));
             } else {
-                blocks.push(Transformer::load(
+                blocks.push(Arc::from(Transformer::load(
                     block_layer_name.clone(),
                     ctx.var_builder.pp(&block_layer_name),
                     &text_cfg,
-                )?);
+                )?));
             }
             let shadow = if let Some(host) = shadow_host.as_deref() {
                 if node_for_layer.is_none() {
