@@ -3468,6 +3468,13 @@ impl Generator for Qwen3Vl {
     }
 
     fn pipeline_stage_count(&self) -> usize { self.pipeline_ranges().len() }
+    fn pipeline_stage_key(&self, stage: usize) -> Result<String> {
+        let ranges = self.pipeline_ranges();
+        let (first, _) = *ranges
+            .get(stage)
+            .ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
+        Ok(self.blocks[first].ident().to_string())
+    }
 
 
 
