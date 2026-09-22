@@ -250,7 +250,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         cache: &mut Cache,
     ) -> Result<Tensor>;
 
-    /// 可变版本的前向推理.
+    /// 可变版本的前向推理（legacy compatibility；新 pipeline 优先使用 immutable stage API）.
     async fn forward_mut(
         &mut self,
         x: &Tensor,
@@ -259,7 +259,18 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         cache: &mut Cache,
     ) -> Result<Tensor>;
 
-    /// 批量推理的接口.
+    /// Immutable batch API used by concurrent stage executors. Implementations
+    /// that are stateless apart from the supplied Cache should override this.
+    async fn forward_batch_shared(
+        &self,
+        _x: &Tensor,
+        _batch: Vec<(String, usize, usize)>,
+        _cache: &mut Cache,
+    ) -> Result<Tensor> {
+        unimplemented!()
+    }
+
+    /// Legacy mutable batch API.
     async fn forward_batch(
         &mut self,
         _x: &Tensor,
