@@ -3469,6 +3469,12 @@ impl Generator for Qwen3Vl {
 
     fn pipeline_stage_count(&self) -> usize { self.pipeline_ranges().len() }
 
+    fn pipeline_stage_batch(&self, stage: usize, index_pos: usize) -> Result<Vec<(String, usize, usize)>> {
+        let ranges = self.pipeline_ranges();
+        let (first, end) = *ranges.get(stage).ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
+        Ok((first..end).map(|block_idx| (self.blocks[block_idx].layer_name().to_string(), index_pos, block_idx)).collect())
+    }
+
     fn pipeline_stage_executor(&self, stage: usize) -> Result<Arc<dyn Forwarder>> {
         let ranges = self.pipeline_ranges();
         let (first, _) = *ranges.get(stage).ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
