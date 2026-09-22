@@ -15,13 +15,22 @@ use super::{CompactBatch, CompactRangeBatch, Message, SamplingRequest, SessionId
 tokio::task_local! {
     static REMOTE_SAMPLING_REQUEST: SamplingRequest;
     static REMOTE_SESSION_ID: SessionId;
+    static REMOTE_PROFILE: Arc<Mutex<DistributedProfile>>;
 }
 
 pub async fn with_remote_session<F>(session_id: SessionId, future: F) -> F::Output
-where
-    F: std::future::Future,
-{
+where F: std::future::Future {
     REMOTE_SESSION_ID.scope(session_id, future).await
+}
+
+pub async fn with_remote_profile<F>(profile: Arc<Mutex<DistributedProfile>>, future: F) -> F::Output
+where F: std::future::Future {
+    REMOTE_PROFILE.scope(profile, future).await
+}
+
+fn update_distributed_profile(update: impl FnOnce(&mut DistributedProfile)) {
+    if REMOTE_PROFILE.try_with(|p| { if let Ok(mut p) = p.lock() { update(&mut p); true } else { false } }).unwrap_or(false) { return; }
+    if let Ok(mut p) = distributed_profile().lock() { update(&mut p); }
 }
 
 fn current_session_id() -> SessionId {
@@ -352,16 +361,17 @@ impl Client {
         let read_time = read_start.elapsed();
         let total_time = total_start.elapsed();
 
-        if let (Ok(mut profile), Message::Tensor { compute_us, .. }) =
-            (distributed_profile().lock(), &msg)
-        {
-            profile.remote_requests += 1;
-            profile.remote_total_s += total_time.as_secs_f64();
-            profile.remote_compute_s += *compute_us as f64 / 1_000_000.0;
-            profile.remote_write_s += write_time.as_secs_f64();
-            profile.remote_read_s += read_time.as_secs_f64();
-            profile.remote_write_bytes += written;
-            profile.remote_read_bytes += read_size;
+        if let Message::Tensor { compute_us, .. } = &msg {
+            let compute_s = *compute_us as f64 / 1_000_000.0;
+            update_distributed_profile(|profile| {
+                profile.remote_requests += 1;
+                profile.remote_total_s += total_time.as_secs_f64();
+                profile.remote_compute_s += compute_s;
+                profile.remote_write_s += write_time.as_secs_f64();
+                profile.remote_read_s += read_time.as_secs_f64();
+                profile.remote_write_bytes += written;
+                profile.remote_read_bytes += read_size;
+            });
         }
 
         if Self::transfer_trace_enabled() {
