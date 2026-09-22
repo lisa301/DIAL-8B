@@ -3589,6 +3589,18 @@ impl Generator for Qwen3Vl {
         Ok(Token { id: next_token, text, is_end_of_stream: Some(next_token) == self.eos_token_id })
     }
 
+    async fn release_pipeline_session(&self, session_id: crate::spm::SessionId) -> Result<()> {
+        let mut released = std::collections::HashSet::new();
+        for block in &self.blocks {
+            let ident = block.ident().to_string();
+            if ident == "local" || !released.insert(ident) {
+                continue;
+            }
+            block.release_remote_session(session_id).await?;
+        }
+        Ok(())
+    }
+
     fn generated_tokens(&self) -> usize {
         self.generated
     }
@@ -3607,7 +3619,10 @@ impl Generator for Qwen3Vl {
             text_rknn_disabled_for_dialog: std::mem::take(&mut self.text_rknn_disabled_for_dialog),
             text_rknn_prefix_validated_for_dialog: std::mem::take(&mut self.text_rknn_prefix_validated_for_dialog),
             text_rknn_validated_last_layer: self.text_rknn_validated_last_layer.take(),
-            fast_logits_processor: self.fast_logits_processor.clone(),
+            fast_logits_processor: {
+                let fresh = create_fast_logits_processor(&self.ctx);
+                std::mem::replace(&mut self.fast_logits_processor, fresh)
+            },
         };
         Ok(Some(Box::new(state)))
     }
