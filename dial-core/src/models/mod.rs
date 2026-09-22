@@ -54,23 +54,30 @@ pub struct PipelineStageOutput {
 }
 
 impl PipelineStageJob {
-    pub async fn execute(mut self) -> Result<PipelineStageOutput> {
-        if self.executors.is_empty() || self.batch.is_empty() {
+    pub async fn execute(self) -> Result<PipelineStageOutput> {
+        let PipelineStageJob {
+            mut x,
+            mut cache,
+            executors,
+            batch,
+            remote_batch,
+        } = self;
+        if executors.is_empty() || batch.is_empty() {
             return Err(anyhow::anyhow!("empty pipeline stage"));
         }
-        if self.remote_batch {
-            self.x = self.executors[0]
-                .forward_batch_shared(&self.x, self.batch, &mut self.cache)
+        if remote_batch {
+            x = executors[0]
+                .forward_batch_shared(&x, batch, &mut cache)
                 .await?;
         } else {
-            if self.executors.len() != self.batch.len() {
+            if executors.len() != batch.len() {
                 return Err(anyhow::anyhow!("local pipeline executor/batch length mismatch"));
             }
-            for (executor, (_, index_pos, block_idx)) in self.executors.iter().zip(self.batch.iter()) {
-                self.x = executor.forward(&self.x, *index_pos, *block_idx, &mut self.cache).await?;
+            for (executor, (_, index_pos, block_idx)) in executors.iter().zip(batch.iter()) {
+                x = executor.forward(&x, *index_pos, *block_idx, &mut cache).await?;
             }
         }
-        Ok(PipelineStageOutput { x: self.x, cache: self.cache })
+        Ok(PipelineStageOutput { x, cache })
     }
 }
 
