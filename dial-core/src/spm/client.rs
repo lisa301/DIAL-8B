@@ -193,7 +193,7 @@ impl Client {
                 "single session={} layer={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
                 session_id, layer_name, index_pos, block_idx, sampling.is_some(), x.shape, x.dtype
             ),
-            Message::Batch { x, batch, sampling } => {
+            Message::Batch { session_id, x, batch, sampling } => {
                 let first = batch
                     .first()
                     .map(|(name, _, _)| name.as_str())
@@ -212,7 +212,7 @@ impl Client {
                     x.dtype
                 )
             }
-            Message::CompactBatch { x, batch, sampling } => format!(
+            Message::CompactBatch { session_id, x, batch, sampling } => format!(
                 "compact_batch session={} ops={} first={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
                 session_id, batch.num_layers,
                 batch.first_layer_name,
@@ -222,7 +222,7 @@ impl Client {
                 x.shape,
                 x.dtype
             ),
-            Message::CompactRangeBatch { x, batch, sampling } => format!(
+            Message::CompactRangeBatch { session_id, x, batch, sampling } => format!(
                 "compact_range_batch session={} ops={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
                 session_id, batch.num_layers, batch.index_pos, batch.first_block_idx, sampling.is_some(), x.shape, x.dtype
             ),
