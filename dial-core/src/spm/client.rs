@@ -579,6 +579,10 @@ impl super::Forwarder for Client {
         Ok(())
     }
 
+    fn requires_remote_sampling(&self) -> bool {
+        self.remote_sampling
+    }
+
     // 返回客户端的唯一身份标识=服务器地址
     fn ident(&self) -> &str {
         &self.address
