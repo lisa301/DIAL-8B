@@ -1,10 +1,7 @@
 name: edge-pipeline-check
 
 on:
-  push:
-    branches: [edge-pipeline]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   check:
