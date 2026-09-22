@@ -21,6 +21,8 @@ use crate::{
 mod api;
 #[cfg(feature = "master")]
 mod master;
+#[cfg(feature = "master")]
+mod engine;
 
 mod client;
 mod planner;
@@ -32,6 +34,8 @@ mod worker;
 
 #[cfg(feature = "master")]
 pub use master::*;
+#[cfg(feature = "master")]
+pub use engine::*;
 
 pub use client::*;
 pub use planner::*;
