@@ -3469,6 +3469,12 @@ impl Generator for Qwen3Vl {
 
     fn pipeline_stage_count(&self) -> usize { self.pipeline_ranges().len() }
 
+    fn pipeline_stage_executor(&self, stage: usize) -> Result<Arc<dyn Forwarder>> {
+        let ranges = self.pipeline_ranges();
+        let (first, _) = *ranges.get(stage).ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
+        Ok(self.blocks[first].clone())
+    }
+
     async fn pipeline_prepare(&mut self, index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> {
         if self.generated == 0 { self.start_dialog_prompt()?; }
         let num_tokens = self.tokens.len();
