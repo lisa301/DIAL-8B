@@ -1687,6 +1687,19 @@ impl Forwarder for Transformer {
         Ok(x)
     }
 
+    async fn forward_batch_shared(
+        &self,
+        x: &Tensor,
+        batch: Vec<(String, usize, usize)>,
+        cache: &mut Cache,
+    ) -> Result<Tensor> {
+        let mut x = x.clone();
+        for (_, index_pos, block_idx) in batch {
+            x = self.forward(&x, index_pos, block_idx, cache).await?;
+        }
+        Ok(x)
+    }
+
     async fn forward_mut(
         &mut self,
         x: &Tensor,
