@@ -122,8 +122,16 @@ pub trait Generator {
     async fn pipeline_finish(&mut self, _state: Box<dyn std::any::Any + Send>) -> Result<Token> {
         Err(anyhow::anyhow!("{} does not support stage pipeline", Self::MODEL_NAME))
     }
-    async fn release_pipeline_session(&self, _session_id: crate::spm::SessionId) -> Result<()> {
-        Ok(())
+    fn pipeline_release_handles(&self) -> Vec<Arc<dyn Forwarder>> { Vec::new() }
+    async fn release_pipeline_session(&self, session_id: crate::spm::SessionId) -> Result<()> {
+        let handles = self.pipeline_release_handles();
+        let mut errors = Vec::new();
+        for handle in handles {
+            if let Err(e) = handle.release_remote_session(session_id).await {
+                errors.push(e.to_string());
+            }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(anyhow::anyhow!(errors.join("; "))) }
     }
     /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize;
