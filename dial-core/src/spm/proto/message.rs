@@ -230,10 +230,10 @@ impl WorkerInfo {
 }
 
 /// 这是SPM分布式通信协议的消息类型.
-#[derive(Serialize, Debug, Deserialize)]
-/// 主从之间只能发送这几种消息，分别是Hello、WorkerInfo、SingleOp、Batch和Tensor。
 pub type SessionId = u64;
 
+/// 主从之间只能发送这几种消息，分别是Hello、WorkerInfo、SingleOp、Batch和Tensor。
+#[derive(Serialize, Debug, Deserialize)]
 pub enum Message {
     /// Hello握手消息.
     Hello,
