@@ -680,7 +680,7 @@ impl<G: Generator + 'static> Worker<G> {
             let compute_start = Instant::now();
 
             /// 记录请求开始时间
-            let (x, ops, sampling) = match op_message {
+            let (session_id, x, ops, sampling) = match op_message {
                 /// 单操作请求
                 Message::SingleOp {
                     session_id,
@@ -692,7 +692,8 @@ impl<G: Generator + 'static> Worker<G> {
                 } => (session_id, x, vec![(layer_name, index_pos, block_idx)], sampling),
                 /// 批量操作请求
                 Message::Batch { session_id, x, batch, sampling } => (session_id, x, batch, sampling),
-                Message::CompactBatch { x, batch, sampling } => (
+                Message::CompactBatch { session_id, x, batch, sampling } => (
+                    session_id,
                     x,
                     Self::expand_compact_batch(
                         batch.first_layer_name,
@@ -702,7 +703,8 @@ impl<G: Generator + 'static> Worker<G> {
                     )?,
                     sampling,
                 ),
-                Message::CompactRangeBatch { x, batch, sampling } => (
+                Message::CompactRangeBatch { session_id, x, batch, sampling } => (
+                    session_id,
                     x,
                     context.expand_compact_range_batch(
                         batch.index_pos,
