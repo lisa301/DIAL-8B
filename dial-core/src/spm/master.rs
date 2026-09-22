@@ -116,7 +116,12 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         result
     }
 
-    pub fn release_session(&mut self, session_id: SessionId) { self.sessions.remove(&session_id); }
+    pub async fn release_session(&mut self, session_id: SessionId) {
+        self.sessions.remove(&session_id);
+        if let Err(e) = self.model.release_pipeline_session(session_id).await {
+            log::warn!("failed to release remote pipeline session {}: {}", session_id, e);
+        }
+    }
 
     /// 逐一生成token，并通过stream函数实时输出。
     pub async fn generate<S>(&mut self, stream: S) -> Result<()>
