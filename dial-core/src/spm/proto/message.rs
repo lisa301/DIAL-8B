@@ -232,6 +232,8 @@ impl WorkerInfo {
 /// 这是SPM分布式通信协议的消息类型.
 #[derive(Serialize, Debug, Deserialize)]
 /// 主从之间只能发送这几种消息，分别是Hello、WorkerInfo、SingleOp、Batch和Tensor。
+pub type SessionId = u64;
+
 pub enum Message {
     /// Hello握手消息.
     Hello,
@@ -239,6 +241,7 @@ pub enum Message {
     WorkerInfo(WorkerInfo),
     /// 单算子推理任务（发任务）.
     SingleOp {
+        session_id: SessionId,
         // 层名字
         layer_name: String,
         // 张量数据
@@ -251,18 +254,21 @@ pub enum Message {
     },
     /// 批量推理任务
     Batch {
+        session_id: SessionId,
         x: RawTensor,
         batch: Vec<(String, usize, usize)>,
         sampling: Option<SamplingRequest>,
     },
     /// 连续层批量推理任务，避免每个 token 重复传几十个层名字。
     CompactBatch {
+        session_id: SessionId,
         x: RawTensor,
         batch: CompactBatch,
         sampling: Option<SamplingRequest>,
     },
     /// 连续 block range 批量推理任务，只传 block 起点和层数，进一步减少字符串元数据。
     CompactRangeBatch {
+        session_id: SessionId,
         x: RawTensor,
         batch: CompactRangeBatch,
         sampling: Option<SamplingRequest>,
@@ -277,6 +283,7 @@ pub enum Message {
 impl Message {
     /// 创建任务消息Single_Op.
     pub fn single_op(
+        session_id: SessionId,
         layer_name: &str,
         x: &Tensor,
         index_pos: usize,
@@ -289,6 +296,7 @@ impl Message {
         let x = RawTensor::from_tensor(x).expect("unsupported tensor dtype for spm single_op");
         // 构建并返回 Message::SingleOp。
         Self::SingleOp {
+            session_id,
             layer_name,
             x,
             index_pos,
@@ -319,11 +327,13 @@ impl Message {
 
     /// 创建批量计算任务消息
     pub fn from_batch(
+        session_id: SessionId,
         x: &Tensor,
         batch: Vec<(String, usize, usize)>,
         sampling: Option<SamplingRequest>,
     ) -> Self {
         Self::Batch {
+            session_id,
             x: RawTensor::from_tensor(x).expect("unsupported tensor dtype for spm batch"),
             batch,
             sampling,
@@ -331,11 +341,13 @@ impl Message {
     }
 
     pub fn from_compact_batch(
+        session_id: SessionId,
         x: &Tensor,
         batch: CompactBatch,
         sampling: Option<SamplingRequest>,
     ) -> Self {
         Self::CompactBatch {
+            session_id,
             x: RawTensor::from_tensor(x).expect("unsupported tensor dtype for spm compact batch"),
             batch,
             sampling,
@@ -343,11 +355,13 @@ impl Message {
     }
 
     pub fn from_compact_range_batch(
+        session_id: SessionId,
         x: &Tensor,
         batch: CompactRangeBatch,
         sampling: Option<SamplingRequest>,
     ) -> Self {
         Self::CompactRangeBatch {
+            session_id,
             x: RawTensor::from_tensor(x)
                 .expect("unsupported tensor dtype for spm compact range batch"),
             batch,
