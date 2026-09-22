@@ -52,7 +52,6 @@ pub struct PipelineEngine<G> {
     ready: VecDeque<ActiveRequest>,
     in_flight: JoinSet<StageTaskResult>,
     stage_slots: Vec<Arc<Semaphore>>,
-    master_slot: Arc<Semaphore>,
     max_active: usize,
     sample_len: usize,
     next_session: SessionId,
@@ -66,9 +65,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         let (tx, rx) = mpsc::unbounded_channel();
         let sample_len = master.ctx.args.sample_len;
         let stage_count = master.pipeline_stage_count().max(1);
-        let master_slot = Arc::new(Semaphore::new(1));
         let mut resources: HashMap<String, Arc<Semaphore>> = HashMap::new();
-        resources.insert("local".to_string(), master_slot.clone());
         let mut stage_slots = Vec::with_capacity(stage_count);
         for stage in 0..stage_count {
             let key = master
@@ -88,7 +85,6 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                 ready: VecDeque::new(),
                 in_flight: JoinSet::new(),
                 stage_slots,
-                master_slot,
                 max_active: max_active.max(1),
                 sample_len,
                 next_session: 1,
