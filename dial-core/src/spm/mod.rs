@@ -25,6 +25,8 @@ mod master;
 mod client;
 mod planner;
 mod proto;
+#[cfg(feature = "master")]
+mod scheduler;
 mod topology;
 mod worker;
 
@@ -34,6 +36,8 @@ pub use master::*;
 pub use client::*;
 pub use planner::*;
 pub use proto::*;
+#[cfg(feature = "master")]
+pub use scheduler::*;
 pub use topology::*;
 pub use worker::*;
 
