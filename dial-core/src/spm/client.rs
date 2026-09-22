@@ -356,15 +356,28 @@ impl Client {
         Ok(lanes.entry(session_id).or_insert_with(|| connection.clone()).clone())
     }
 
-    pub async fn release_session(&self, session_id: SessionId) {
-        if session_id == 0 { return; }
+    pub async fn release_session(&self, session_id: SessionId) -> Result<()> {
+        if session_id == 0 { return Ok(()); }
         let lane = { self.session_connections.lock().await.remove(&session_id) };
-        if let Some(lane) = lane {
-            let mut connection = lane.lock().await;
-            if Message::ReleaseSession { session_id }.to_writer(&mut connection.stream).await.is_ok() {
-                let _ = Message::from_reader(&mut connection.stream).await;
+        let Some(lane) = lane else { return Ok(()); };
+        let mut connection = lane.lock().await;
+        let release = async {
+            Message::ReleaseSession { session_id }
+                .to_writer(&mut connection.stream)
+                .await
+                .map_err(|e| anyhow!("failed to send release_session {} to {}: {}", session_id, self.address, e))?;
+            let (_, ack) = Message::from_reader(&mut connection.stream)
+                .await
+                .map_err(|e| anyhow!("failed to receive release_session {} ack from {}: {}", session_id, self.address, e))?;
+            match ack {
+                Message::ReleaseSession { session_id: ack_id } if ack_id == session_id => Ok(()),
+                other => Err(anyhow!("unexpected release_session response from {}: {:?}", self.address, other)),
             }
-        }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), release)
+            .await
+            .map_err(|_| anyhow!("release_session {} to {} timed out", session_id, self.address))??;
+        Ok(())
     }
 
     /// Send a Message to the worker and return a response.
@@ -575,8 +588,7 @@ impl super::Forwarder for Client {
     }
 
     async fn release_remote_session(&self, session_id: SessionId) -> Result<()> {
-        Client::release_session(self, session_id).await;
-        Ok(())
+        Client::release_session(self, session_id).await
     }
 
     fn requires_remote_sampling(&self) -> bool {
