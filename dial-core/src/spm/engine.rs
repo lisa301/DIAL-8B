@@ -151,8 +151,23 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
     }
 
     async fn release_request(&self, request: &ActiveRequest) {
-        let mut master = self.master.lock().await;
-        master.release_session(request.session_id).await;
+        let handles = {
+            let mut master = self.master.lock().await;
+            master.take_session_release_handles(request.session_id)
+        };
+        if handles.is_empty() { return; }
+        let session_id = request.session_id;
+        let mut cleanup = JoinSet::new();
+        for handle in handles {
+            cleanup.spawn(async move { handle.release_remote_session(session_id).await });
+        }
+        while let Some(result) = cleanup.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => log::warn!("failed to release remote pipeline session {}: {}", session_id, e),
+                Err(e) => log::warn!("remote pipeline cleanup task failed for session {}: {}", session_id, e),
+            }
+        }
     }
 
     async fn handle_stage_completion(&mut self, completed: StageTaskResult) {
