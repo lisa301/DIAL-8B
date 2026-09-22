@@ -119,6 +119,9 @@ pub trait Generator {
     async fn pipeline_finish(&mut self, _state: Box<dyn std::any::Any + Send>) -> Result<Token> {
         Err(anyhow::anyhow!("{} does not support stage pipeline", Self::MODEL_NAME))
     }
+    async fn release_pipeline_session(&self, _session_id: crate::spm::SessionId) -> Result<()> {
+        Ok(())
+    }
     /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize;
 
