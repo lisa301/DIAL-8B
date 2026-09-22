@@ -1098,7 +1098,6 @@ struct Qwen3VlSessionState {
 struct PipelineHiddenState {
     x: Option<Tensor>,
     cache: Option<Cache>,
-    index: usize,
     context_index: usize,
     num_context_tokens: usize,
     num_tokens_before: usize,
@@ -3516,7 +3515,6 @@ impl Generator for Qwen3Vl {
         Ok(Some(Box::new(PipelineHiddenState {
             x: Some(x),
             cache: Some(cache),
-            index,
             context_index,
             num_context_tokens: context_size,
             num_tokens_before: num_tokens,
