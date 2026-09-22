@@ -691,7 +691,7 @@ mod tests {
         let _lane = client.connection_for_session(42).await.unwrap();
         assert!(client.session_connections.lock().await.contains_key(&42));
 
-        client.release_session(42).await;
+        client.release_session(42).await.unwrap();
         assert!(!client.session_connections.lock().await.contains_key(&42));
         server.await.unwrap();
     }
