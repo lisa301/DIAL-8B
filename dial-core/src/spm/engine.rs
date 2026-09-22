@@ -304,6 +304,16 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         loop {
             self.fill_slots().await;
 
+            // Drain already-completed stages before scheduling more ready work.
+            // This prevents a legacy/RKNN fallback request that immediately
+            // requeues itself from starving completed pipeline stages.
+            while let Some(joined) = self.in_flight.try_join_next() {
+                match joined {
+                    Ok(completed) => self.handle_stage_completion(completed).await,
+                    Err(e) => log::error!("pipeline stage task failed: {e}"),
+                }
+            }
+
             if let Some(request) = self.ready.pop_front() {
                 self.schedule_ready(request).await;
                 tokio::task::yield_now().await;
@@ -313,9 +323,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
             if !self.in_flight.is_empty() {
                 match self.in_flight.join_next().await {
                     Some(Ok(completed)) => self.handle_stage_completion(completed).await,
-                    Some(Err(e)) => {
-                        log::error!("pipeline stage task failed: {e}");
-                    }
+                    Some(Err(e)) => log::error!("pipeline stage task failed: {e}"),
                     None => {}
                 }
                 continue;
