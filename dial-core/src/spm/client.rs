@@ -469,6 +469,27 @@ impl super::Forwarder for Client {
         .await
     }
 
+    async fn forward_batch_shared(
+        &self,
+        x: &Tensor,
+        batch: Vec<(String, usize, usize)>,
+        _: &mut Cache,
+    ) -> Result<Tensor> {
+        let sampling = self.remote_sampling.then(current_sampling_request).flatten();
+        if self.compact_batch {
+            if let Some((first_layer_name, index_pos, first_block_idx)) = batch.first().cloned() {
+                let contiguous = batch.iter().enumerate().all(|(off, (_, idx, block))| *idx == index_pos && *block == first_block_idx + off);
+                if contiguous {
+                    if self.compact_range_batch {
+                        return self.forward_request(super::Message::from_compact_range_batch(current_session_id(), x, CompactRangeBatch { index_pos, first_block_idx, num_layers: batch.len() }, sampling)).await;
+                    }
+                    return self.forward_request(super::Message::from_compact_batch(current_session_id(), x, CompactBatch { first_layer_name, index_pos, first_block_idx, num_layers: batch.len() }, sampling)).await;
+                }
+            }
+        }
+        self.forward_request(super::Message::from_batch(current_session_id(), x, batch, sampling)).await
+    }
+
     /// 一次性发送多个层的批量计算任务，给远端服务器发一批算子一起执行，减少网络往返。
     async fn forward_batch(
         &mut self,
