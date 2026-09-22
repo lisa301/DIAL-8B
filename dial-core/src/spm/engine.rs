@@ -136,7 +136,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
 
     async fn release_request(&self, request: &ActiveRequest) {
         let mut master = self.master.lock().await;
-        master.release_session(request.session_id);
+        master.release_session(request.session_id).await;
     }
 
     async fn handle_stage_completion(&mut self, completed: StageTaskResult) {
