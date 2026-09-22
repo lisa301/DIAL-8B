@@ -640,6 +640,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_session_closes_and_removes_dedicated_lane() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+
+        let server = tokio::spawn(async move {
+            let (mut base, _) = listener.accept().await.unwrap();
+            let (_, hello) = Message::from_reader(&mut base).await.unwrap();
+            assert!(matches!(hello, Message::Hello));
+            Message::WorkerInfo(WorkerInfo::default())
+                .to_writer(&mut base)
+                .await
+                .unwrap();
+
+            let (mut lane, _) = listener.accept().await.unwrap();
+            let (_, hello) = Message::from_reader(&mut lane).await.unwrap();
+            assert!(matches!(hello, Message::Hello));
+            Message::WorkerInfo(WorkerInfo::default())
+                .to_writer(&mut lane)
+                .await
+                .unwrap();
+
+            let (_, release) = Message::from_reader(&mut lane).await.unwrap();
+            assert!(matches!(release, Message::ReleaseSession { session_id: 42 }));
+            Message::ReleaseSession { session_id: 42 }
+                .to_writer(&mut lane)
+                .await
+                .unwrap();
+        });
+
+        let client = Client::new(Device::Cpu, &address, "model.layers.0")
+            .await
+            .unwrap();
+        let _lane = client.connection_for_session(42).await.unwrap();
+        assert!(client.session_connections.lock().await.contains_key(&42));
+
+        client.release_session(42).await;
+        assert!(!client.session_connections.lock().await.contains_key(&42));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn probe_worker_returns_handshake_info() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
