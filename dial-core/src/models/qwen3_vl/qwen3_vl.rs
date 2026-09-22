@@ -17,7 +17,7 @@ use tokenizers::Tokenizer;
 
 use crate::{
     models::llama3::{Cache, Config},
-    models::{chat::Message, Generator, Token},
+    models::{chat::Message, Generator, Token, PipelineStageJob, PipelineStageOutput},
     spm::{Context, Forwarder},
 };
 
@@ -1096,12 +1096,12 @@ struct Qwen3VlSessionState {
 }
 
 struct PipelineHiddenState {
-    x: Tensor,
+    x: Option<Tensor>,
+    cache: Option<Cache>,
     index: usize,
     context_index: usize,
     num_context_tokens: usize,
     num_tokens_before: usize,
-    inject_images: bool,
     stage_ranges: Vec<(usize, usize)>,
 }
 
@@ -3482,45 +3482,107 @@ impl Generator for Qwen3Vl {
     }
 
     async fn pipeline_prepare(&mut self, index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> {
-        if self.generated == 0 { self.start_dialog_prompt()?; }
+        // Keep the multimodal/full-context prefill on the mature path.  The detached
+        // stage pipeline is used for decode steps, where context_size == 1 and there
+        // are no image/deepstack mutations between transformer layers.
+        if index == 0 || self.generated == 0 {
+            return Ok(None);
+        }
         let num_tokens = self.tokens.len();
-        let (context_size, context_index) = if self.ctx.cache.with_kv_cache() && index > 0 { (1, self.index_pos) } else { (num_tokens, 0) };
+        let context_size = if self.ctx.cache.with_kv_cache() { 1 } else { num_tokens };
+        if context_size != 1 {
+            return Ok(None);
+        }
+        let context_index = self.index_pos;
         let context_offset = num_tokens.saturating_sub(context_size);
         let input_ids = Tensor::new(&self.tokens[context_offset..], &self.ctx.device)?.unsqueeze(0)?;
-        let mut x = self.embedding.forward(&input_ids)?;
-        let inject_images = self.index_pos == 0 && context_index == 0 && context_size == num_tokens;
-        if inject_images && !self.image_spans.is_empty() { x = self.inject_image_embeddings(&x)?; }
-        Ok(Some(Box::new(PipelineHiddenState { x, index, context_index, num_context_tokens: context_size, num_tokens_before: num_tokens, inject_images, stage_ranges: self.pipeline_ranges() })))
+        let x = self.embedding.forward(&input_ids)?;
+        let fresh_cache = self.ctx.cache.as_new();
+        let cache = std::mem::replace(&mut self.ctx.cache, fresh_cache);
+        Ok(Some(Box::new(PipelineHiddenState {
+            x: Some(x),
+            cache: Some(cache),
+            index,
+            context_index,
+            num_context_tokens: context_size,
+            num_tokens_before: num_tokens,
+            stage_ranges: self.pipeline_ranges(),
+        })))
     }
 
-    async fn pipeline_stage(&self, stage: usize, state: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
-        let mut state = *state.downcast::<PipelineHiddenState>().map_err(|_| anyhow!("invalid qwen3-vl pipeline hidden state"))?;
-        let (first, end) = *state.stage_ranges.get(stage).ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
-        // Stage-local KV is carried by the logical session on workers. Local layers still
-        // use the session cache restored by the engine before preparation/finalization.
-        let mut cache = self.ctx.cache.as_new();
-        let ident = self.blocks[first].ident().to_string();
-        if ident == "local" {
-            for block_idx in first..end {
-                if state.inject_images { state.x = self.inject_deepstack_embeddings(&state.x, block_idx)?; }
-                state.x = self.blocks[block_idx].forward(&state.x, state.context_index, block_idx, &mut cache).await?;
-            }
+    fn pipeline_detach_stage(
+        &self,
+        stage: usize,
+        state: &mut Box<dyn std::any::Any + Send>,
+    ) -> Result<PipelineStageJob> {
+        let state = state
+            .downcast_mut::<PipelineHiddenState>()
+            .ok_or_else(|| anyhow!("invalid qwen3-vl pipeline hidden state"))?;
+        let (first, end) = *state
+            .stage_ranges
+            .get(stage)
+            .ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
+        let x = state.x.take().ok_or_else(|| anyhow!("pipeline activation already detached"))?;
+        let cache = state.cache.take().ok_or_else(|| anyhow!("pipeline cache already detached"))?;
+        let batch: Vec<_> = (first..end)
+            .map(|block_idx| {
+                (
+                    self.blocks[block_idx].layer_name().to_string(),
+                    state.context_index,
+                    block_idx,
+                )
+            })
+            .collect();
+        let remote_batch = self.blocks[first].ident() != "local";
+        let executors = if remote_batch {
+            vec![self.blocks[first].clone()]
         } else {
-            let batch = (first..end).map(|block_idx| (self.blocks[block_idx].layer_name().to_string(), state.context_index, block_idx)).collect();
-            state.x = self.blocks[first].forward_batch_shared(&state.x, batch, &mut cache).await?;
-        }
-        Ok(Box::new(state))
+            (first..end).map(|idx| self.blocks[idx].clone()).collect()
+        };
+        Ok(PipelineStageJob { x, cache, executors, batch, remote_batch })
     }
 
-    async fn pipeline_finish(&mut self, state: Box<dyn std::any::Any + Send>) -> Result<Token> {
-        let state = *state.downcast::<PipelineHiddenState>().map_err(|_| anyhow!("invalid qwen3-vl pipeline hidden state"))?;
-        let seq_len = state.x.dims3()?.1;
-        let x = self.ln_f.forward(&state.x)?;
+    fn pipeline_attach_stage(
+        &self,
+        state: &mut Box<dyn std::any::Any + Send>,
+        output: PipelineStageOutput,
+    ) -> Result<()> {
+        let state = state
+            .downcast_mut::<PipelineHiddenState>()
+            .ok_or_else(|| anyhow!("invalid qwen3-vl pipeline hidden state"))?;
+        if state.x.is_some() || state.cache.is_some() {
+            bail!("pipeline stage result attached twice");
+        }
+        state.x = Some(output.x);
+        state.cache = Some(output.cache);
+        Ok(())
+    }
+
+    async fn pipeline_stage(&self, stage: usize, mut state: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
+        let job = self.pipeline_detach_stage(stage, &mut state)?;
+        let output = job.execute().await?;
+        self.pipeline_attach_stage(&mut state, output)?;
+        Ok(state)
+    }
+
+    async fn pipeline_finish(&mut self, mut state: Box<dyn std::any::Any + Send>) -> Result<Token> {
+        let state = state
+            .downcast_mut::<PipelineHiddenState>()
+            .ok_or_else(|| anyhow!("invalid qwen3-vl pipeline hidden state"))?;
+        let x = state.x.take().ok_or_else(|| anyhow!("missing final pipeline activation"))?;
+        let cache = state.cache.take().ok_or_else(|| anyhow!("missing final pipeline cache"))?;
+        self.ctx.cache = cache;
+        let seq_len = x.dims3()?.1;
+        let x = self.ln_f.forward(&x)?;
         let x = x.i((.., seq_len - 1, ..))?;
         let logits = self.lm_head_forward(&x)?;
         self.index_pos += state.num_context_tokens;
         let start_at = state.num_tokens_before.saturating_sub(self.ctx.args.repeat_last_n);
-        let next_token = self.fast_logits_processor.sample(&logits.squeeze(0)?, self.ctx.args.repeat_penalty, &self.tokens[start_at..])?;
+        let next_token = self.fast_logits_processor.sample(
+            &logits.squeeze(0)?,
+            self.ctx.args.repeat_penalty,
+            &self.tokens[start_at..],
+        )?;
         self.generated += 1;
         self.tokens.push(next_token);
         let text = self.tokenizer.decode(&[next_token], false).ok();
