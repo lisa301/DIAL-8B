@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use actix_web::web;
@@ -10,7 +9,6 @@ use actix_web::Responder;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
@@ -178,7 +176,7 @@ async fn topology(state: web::Data<Context>) -> impl Responder {
             format!("{:?}", state.dtype),
             if state.device.is_cuda() {
                 "cuda".to_string()
-            } else if master.ctx.device.is_metal() {
+            } else if state.device.is_metal() {
                 "metal".to_string()
             } else {
                 "cpu".to_string()
