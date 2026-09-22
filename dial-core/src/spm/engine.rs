@@ -35,13 +35,17 @@ pub struct PipelineEngine<G> {
     rx: mpsc::UnboundedReceiver<EngineRequest>,
     active: VecDeque<ActiveRequest>,
     max_active: usize,
+    sample_len: usize,
     next_session: SessionId,
 }
 
 impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
     pub fn channel(master: Master<G>, max_active: usize) -> (mpsc::UnboundedSender<EngineRequest>, Self) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (tx, Self { master: Arc::new(Mutex::new(master)), rx, active: VecDeque::new(), max_active: max_active.max(1), next_session: 1 })
+        {
+            let sample_len = master.ctx.args.sample_len;
+            (tx, Self { master: Arc::new(Mutex::new(master)), rx, active: VecDeque::new(), max_active: max_active.max(1), sample_len, next_session: 1 })
+        }
     }
 
     async fn admit(&mut self, request: EngineRequest) {
@@ -68,6 +72,13 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         loop {
             self.fill_slots().await;
             if let Some(mut request) = self.active.pop_front() {
+                if request.step >= self.sample_len {
+                    let mut master = self.master.lock().await;
+                    master.release_session(request.session_id);
+                    let _ = request.events.send(EngineEvent::Finished { generated_tokens: request.generated, elapsed_s: request.started.elapsed().as_secs_f64() });
+                    drop(master);
+                    continue;
+                }
                 let mut master = self.master.lock().await;
                 let result = master.step_session(request.session_id, request.step).await;
                 match result {
