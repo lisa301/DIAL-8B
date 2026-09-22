@@ -98,6 +98,9 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
     }
 
     pub fn pipeline_stage_count(&self) -> usize { self.model.pipeline_stage_count() }
+    pub fn pipeline_stage_key(&self, stage: usize) -> Result<String> {
+        self.model.pipeline_stage_key(stage)
+    }
 
     /// Execute exactly one autoregressive step for a session. This is the scheduling
     /// primitive used to interleave A/B/C instead of running A to completion first.
