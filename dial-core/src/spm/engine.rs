@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::models::{chat::Message, Generator};
-use super::{Master, SessionId};
+use super::{with_remote_profile, DistributedProfile, Master, SessionId};
 
 pub struct EngineRequest {
     pub messages: Vec<Message>,
@@ -16,7 +16,7 @@ pub struct EngineRequest {
 #[derive(Debug)]
 pub enum EngineEvent {
     Token(String),
-    Finished { generated_tokens: usize, elapsed_s: f64 },
+    Finished { generated_tokens: usize, elapsed_s: f64, profile: DistributedProfile },
     Error(String),
 }
 
@@ -26,6 +26,7 @@ struct ActiveRequest {
     generated: usize,
     started: Instant,
     events: mpsc::UnboundedSender<EngineEvent>,
+    profile: Arc<StdMutex<DistributedProfile>>,
 }
 
 /// Single model owner + request-level round-robin. The model weights remain one copy;
@@ -56,7 +57,7 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
             Ok(()) => {
                 drop(master);
                 let _ = request.accepted.send(id);
-                self.active.push_back(ActiveRequest { session_id: id, step: 0, generated: 0, started: Instant::now(), events: request.events });
+                self.active.push_back(ActiveRequest { session_id: id, step: 0, generated: 0, started: Instant::now(), events: request.events, profile: Arc::new(StdMutex::new(DistributedProfile::default())) });
             }
             Err(e) => { let _ = request.events.send(EngineEvent::Error(e.to_string())); }
         }
@@ -75,12 +76,13 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
                 if request.step >= self.sample_len {
                     let mut master = self.master.lock().await;
                     master.release_session(request.session_id);
-                    let _ = request.events.send(EngineEvent::Finished { generated_tokens: request.generated, elapsed_s: request.started.elapsed().as_secs_f64() });
+                    let profile = request.profile.lock().map(|p| p.clone()).unwrap_or_default();
+                    let _ = request.events.send(EngineEvent::Finished { generated_tokens: request.generated, elapsed_s: request.started.elapsed().as_secs_f64(), profile });
                     drop(master);
                     continue;
                 }
                 let mut master = self.master.lock().await;
-                let result = master.step_session(request.session_id, request.step).await;
+                let result = with_remote_profile(request.profile.clone(), master.step_session(request.session_id, request.step)).await;
                 match result {
                     Ok(token) if token.is_end_of_stream => {
                         master.release_session(request.session_id);
