@@ -114,6 +114,11 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         result
     }
 
+    pub fn take_session_release_handles(&mut self, session_id: SessionId) -> Vec<std::sync::Arc<dyn crate::spm::Forwarder>> {
+        self.sessions.remove(&session_id);
+        self.model.pipeline_release_handles()
+    }
+
     pub async fn release_session(&mut self, session_id: SessionId) {
         self.sessions.remove(&session_id);
         if let Err(e) = self.model.release_pipeline_session(session_id).await {
