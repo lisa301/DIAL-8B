@@ -87,9 +87,6 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         self.model.pipeline_attach_stage(hidden, output)
     }
 
-    pub async fn run_session_stage(&mut self, session_id: SessionId, stage: usize, hidden: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
-        with_remote_session(session_id, self.model.pipeline_stage(stage, hidden)).await
-    }
 
     pub async fn finish_session_step(&mut self, session_id: SessionId, hidden: Box<dyn std::any::Any + Send>) -> Result<crate::models::Token> {
         let state = self.sessions.remove(&session_id).ok_or_else(|| anyhow::anyhow!("unknown pipeline session {session_id}"))?;
@@ -101,8 +98,6 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
     }
 
     pub fn pipeline_stage_count(&self) -> usize { self.model.pipeline_stage_count() }
-    pub fn pipeline_stage_executor(&self, stage: usize) -> Result<std::sync::Arc<dyn crate::spm::Forwarder>> { self.model.pipeline_stage_executor(stage) }
-    pub fn pipeline_stage_batch(&self, stage: usize, index_pos: usize) -> Result<Vec<(String, usize, usize)>> { self.model.pipeline_stage_batch(stage, index_pos) }
 
     /// Execute exactly one autoregressive step for a session. This is the scheduling
     /// primitive used to interleave A/B/C instead of running A to completion first.
