@@ -114,6 +114,7 @@ enum FastSampling {
     TopKThenTopP { k: usize, p: f64, temperature: f64 },
 }
 
+#[derive(Clone)]
 struct FastLogitsProcessor {
     rng: rand::rngs::StdRng,
     sampling: FastSampling,
@@ -1091,6 +1092,7 @@ struct Qwen3VlSessionState {
     text_rknn_disabled_for_dialog: bool,
     text_rknn_prefix_validated_for_dialog: bool,
     text_rknn_validated_last_layer: Option<usize>,
+    fast_logits_processor: FastLogitsProcessor,
 }
 
 pub struct Qwen3Vl {
@@ -3459,6 +3461,7 @@ impl Generator for Qwen3Vl {
             text_rknn_disabled_for_dialog: std::mem::take(&mut self.text_rknn_disabled_for_dialog),
             text_rknn_prefix_validated_for_dialog: std::mem::take(&mut self.text_rknn_prefix_validated_for_dialog),
             text_rknn_validated_last_layer: self.text_rknn_validated_last_layer.take(),
+            fast_logits_processor: self.fast_logits_processor.clone(),
         };
         Ok(Some(Box::new(state)))
     }
@@ -3468,7 +3471,7 @@ impl Generator for Qwen3Vl {
             .map_err(|_| anyhow!("invalid Qwen3-VL pipeline session state"))?;
         let Qwen3VlSessionState { cache, history, tokens, image_spans, deepstack_spans, index_pos, generated,
             force_shadow_blocks_for_dialog, text_rknn_disabled_for_dialog,
-            text_rknn_prefix_validated_for_dialog, text_rknn_validated_last_layer } = *state;
+            text_rknn_prefix_validated_for_dialog, text_rknn_validated_last_layer, fast_logits_processor } = *state;
         self.ctx.cache = cache;
         self.history = history;
         self.tokens = tokens;
@@ -3480,6 +3483,7 @@ impl Generator for Qwen3Vl {
         self.text_rknn_disabled_for_dialog = text_rknn_disabled_for_dialog;
         self.text_rknn_prefix_validated_for_dialog = text_rknn_prefix_validated_for_dialog;
         self.text_rknn_validated_last_layer = text_rknn_validated_last_layer;
+        self.fast_logits_processor = fast_logits_processor;
         Ok(())
     }
 }
