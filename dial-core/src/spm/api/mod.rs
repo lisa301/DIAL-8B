@@ -407,7 +407,6 @@ where
 
     if !stream {
         let session_id = uuid::Uuid::new_v4().as_u128() as u64;
-        let session_id = uuid::Uuid::new_v4().as_u128() as u64;
         let mut master = state.write().await;
 
         if let Err(e) = master.reset() {
@@ -532,6 +531,7 @@ where
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let session_id = uuid::Uuid::new_v4().as_u128() as u64;
 
         let mut master = state.write().await;
 
