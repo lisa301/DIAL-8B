@@ -3602,14 +3602,21 @@ impl Generator for Qwen3Vl {
 
     async fn release_pipeline_session(&self, session_id: crate::spm::SessionId) -> Result<()> {
         let mut released = std::collections::HashSet::new();
+        let mut errors = Vec::new();
         for block in &self.blocks {
             let ident = block.ident().to_string();
-            if ident == "local" || !released.insert(ident) {
+            if ident == "local" || !released.insert(ident.clone()) {
                 continue;
             }
-            block.release_remote_session(session_id).await?;
+            if let Err(e) = block.release_remote_session(session_id).await {
+                errors.push(format!("{}: {}", ident, e));
+            }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("failed to release pipeline session {} on {}", session_id, errors.join("; ")))
+        }
     }
 
     fn generated_tokens(&self) -> usize {
