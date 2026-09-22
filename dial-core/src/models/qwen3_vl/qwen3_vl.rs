@@ -3217,11 +3217,12 @@ impl Generator for Qwen3Vl {
                     .await?;
                 blocks.push(Arc::new(client));
             } else {
-                blocks.push(Arc::from(Transformer::load(
+                let block: Box<dyn Forwarder> = Transformer::load(
                     block_layer_name.clone(),
                     ctx.var_builder.pp(&block_layer_name),
                     &text_cfg,
-                )?));
+                )?;
+                blocks.push(Arc::from(block));
             }
             let shadow = if let Some(host) = shadow_host.as_deref() {
                 if node_for_layer.is_none() {
