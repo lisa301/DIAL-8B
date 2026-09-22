@@ -3469,17 +3469,7 @@ impl Generator for Qwen3Vl {
 
     fn pipeline_stage_count(&self) -> usize { self.pipeline_ranges().len() }
 
-    fn pipeline_stage_batch(&self, stage: usize, index_pos: usize) -> Result<Vec<(String, usize, usize)>> {
-        let ranges = self.pipeline_ranges();
-        let (first, end) = *ranges.get(stage).ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
-        Ok((first..end).map(|block_idx| (self.blocks[block_idx].layer_name().to_string(), index_pos, block_idx)).collect())
-    }
 
-    fn pipeline_stage_executor(&self, stage: usize) -> Result<Arc<dyn Forwarder>> {
-        let ranges = self.pipeline_ranges();
-        let (first, _) = *ranges.get(stage).ok_or_else(|| anyhow!("invalid pipeline stage {stage}"))?;
-        Ok(self.blocks[first].clone())
-    }
 
     async fn pipeline_prepare(&mut self, index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> {
         // Preserve the specialized RKNN text path when explicitly configured.
@@ -3575,12 +3565,6 @@ impl Generator for Qwen3Vl {
         Ok(())
     }
 
-    async fn pipeline_stage(&self, stage: usize, mut state: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
-        let job = self.pipeline_detach_stage(stage, &mut state)?;
-        let output = job.execute().await?;
-        self.pipeline_attach_stage(&mut state, output)?;
-        Ok(state)
-    }
 
     async fn pipeline_finish(&mut self, mut state: Box<dyn std::any::Any + Send>) -> Result<Token> {
         let state = state
