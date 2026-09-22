@@ -97,6 +97,11 @@ pub trait Generator {
 
     /// Number of independently schedulable transformer stages for this model.
     fn pipeline_stage_count(&self) -> usize { 1 }
+    /// Stable execution-resource key for a stage (e.g. "local" or worker address).
+    /// Stages with the same key share one scheduler slot.
+    fn pipeline_stage_key(&self, stage: usize) -> Result<String> {
+        Ok(format!("stage-{stage}"))
+    }
 
     /// Stage-split execution hooks. Models may expose a prepared hidden state and
     /// advance it one owner-contiguous stage at a time. Defaults preserve legacy behavior.
