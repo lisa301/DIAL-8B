@@ -62,6 +62,31 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         Ok(())
     }
 
+    pub async fn prepare_session_step(&mut self, session_id: SessionId, index: usize) -> Result<Box<dyn std::any::Any + Send>> {
+        let state = self.sessions.remove(&session_id).ok_or_else(|| anyhow::anyhow!("unknown pipeline session {session_id}"))?;
+        self.model.restore_session(state)?;
+        let hidden = with_remote_session(session_id, self.model.pipeline_prepare(index)).await?
+            .ok_or_else(|| anyhow::anyhow!("{} does not expose pipeline stages", G::MODEL_NAME))?;
+        let saved = self.model.save_session()?.ok_or_else(|| anyhow::anyhow!("missing session state"))?;
+        self.sessions.insert(session_id, saved);
+        Ok(hidden)
+    }
+
+    pub async fn run_session_stage(&mut self, session_id: SessionId, stage: usize, hidden: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
+        with_remote_session(session_id, self.model.pipeline_stage(stage, hidden)).await
+    }
+
+    pub async fn finish_session_step(&mut self, session_id: SessionId, hidden: Box<dyn std::any::Any + Send>) -> Result<crate::models::Token> {
+        let state = self.sessions.remove(&session_id).ok_or_else(|| anyhow::anyhow!("unknown pipeline session {session_id}"))?;
+        self.model.restore_session(state)?;
+        let token = self.model.pipeline_finish(hidden).await;
+        let saved = self.model.save_session()?;
+        if let Some(saved) = saved { self.sessions.insert(session_id, saved); }
+        token
+    }
+
+    pub fn pipeline_stage_count(&self) -> usize { self.model.pipeline_stage_count() }
+
     /// Execute exactly one autoregressive step for a session. This is the scheduling
     /// primitive used to interleave A/B/C instead of running A to completion first.
     pub async fn step_session(&mut self, session_id: SessionId, index: usize) -> Result<crate::models::Token> {
