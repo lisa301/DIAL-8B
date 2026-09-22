@@ -10,10 +10,22 @@ use tokio::{net::TcpStream, sync::Mutex as AsyncMutex};
 
 use crate::models::llama3::{Cache, Config};
 
-use super::{CompactBatch, CompactRangeBatch, Message, SamplingRequest, WorkerInfo};
+use super::{CompactBatch, CompactRangeBatch, Message, SamplingRequest, SessionId, WorkerInfo};
 
 tokio::task_local! {
     static REMOTE_SAMPLING_REQUEST: SamplingRequest;
+    static REMOTE_SESSION_ID: SessionId;
+}
+
+pub async fn with_remote_session<F>(session_id: SessionId, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    REMOTE_SESSION_ID.scope(session_id, future).await
+}
+
+fn current_session_id() -> SessionId {
+    REMOTE_SESSION_ID.try_with(|id| *id).unwrap_or(0)
 }
 
 pub async fn with_remote_sampling_request<F>(sampling: SamplingRequest, future: F) -> F::Output
@@ -171,14 +183,15 @@ impl Client {
             Message::Hello => "hello".to_string(),
             Message::WorkerInfo(_) => "worker_info".to_string(),
             Message::SingleOp {
+                session_id,
                 layer_name,
                 x,
                 index_pos,
                 block_idx,
                 sampling,
             } => format!(
-                "single layer={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
-                layer_name, index_pos, block_idx, sampling.is_some(), x.shape, x.dtype
+                "single session={} layer={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
+                session_id, layer_name, index_pos, block_idx, sampling.is_some(), x.shape, x.dtype
             ),
             Message::Batch { x, batch, sampling } => {
                 let first = batch
@@ -190,8 +203,8 @@ impl Client {
                     .map(|(name, _, _)| name.as_str())
                     .unwrap_or("-");
                 format!(
-                    "batch ops={} first={} last={} sampling={} shape={:?} dtype={:?}",
-                    batch.len(),
+                    "batch session={} ops={} first={} last={} sampling={} shape={:?} dtype={:?}",
+                    session_id, batch.len(),
                     first,
                     last,
                     sampling.is_some(),
@@ -200,8 +213,8 @@ impl Client {
                 )
             }
             Message::CompactBatch { x, batch, sampling } => format!(
-                "compact_batch ops={} first={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
-                batch.num_layers,
+                "compact_batch session={} ops={} first={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
+                session_id, batch.num_layers,
                 batch.first_layer_name,
                 batch.index_pos,
                 batch.first_block_idx,
@@ -210,8 +223,8 @@ impl Client {
                 x.dtype
             ),
             Message::CompactRangeBatch { x, batch, sampling } => format!(
-                "compact_range_batch ops={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
-                batch.num_layers, batch.index_pos, batch.first_block_idx, sampling.is_some(), x.shape, x.dtype
+                "compact_range_batch session={} ops={} index_pos={} block_idx={} sampling={} shape={:?} dtype={:?}",
+                session_id, batch.num_layers, batch.index_pos, batch.first_block_idx, sampling.is_some(), x.shape, x.dtype
             ),
             Message::Tensor { x, compute_us } => format!(
                 "tensor shape={:?} dtype={:?} compute={:.3}ms",
@@ -376,6 +389,7 @@ impl super::Forwarder for Client {
         _: &mut Cache,
     ) -> Result<Tensor> {
         self.forward_request(super::Message::single_op(
+            current_session_id(),
             &self.layer_name,
             x,
             index_pos,
@@ -423,6 +437,7 @@ impl super::Forwarder for Client {
                 if self.compact_range_batch {
                     return self
                         .forward_request(super::Message::from_compact_range_batch(
+                            current_session_id(),
                             x,
                             CompactRangeBatch {
                                 index_pos,
@@ -435,6 +450,7 @@ impl super::Forwarder for Client {
                 }
                 return self
                     .forward_request(super::Message::from_compact_batch(
+                        current_session_id(),
                         x,
                         CompactBatch {
                             first_layer_name,
@@ -448,7 +464,7 @@ impl super::Forwarder for Client {
             }
         }
         // 打包成Batch信息->发送远程请求->返回结果
-        self.forward_request(super::Message::from_batch(x, batch, sampling))
+        self.forward_request(super::Message::from_batch(current_session_id(), x, batch, sampling))
             .await
     }
 
