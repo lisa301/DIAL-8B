@@ -101,20 +101,11 @@ pub trait Generator {
     /// Stage-split execution hooks. Models may expose a prepared hidden state and
     /// advance it one owner-contiguous stage at a time. Defaults preserve legacy behavior.
     async fn pipeline_prepare(&mut self, _index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> { Ok(None) }
-    fn pipeline_stage_batch(&self, _stage: usize, _index_pos: usize) -> Result<Vec<(String, usize, usize)>> {
-        Err(anyhow::anyhow!("{} does not expose pipeline stage batches", Self::MODEL_NAME))
-    }
-    fn pipeline_stage_executor(&self, _stage: usize) -> Result<Arc<dyn Forwarder>> {
-        Err(anyhow::anyhow!("{} does not expose shared pipeline stage executors", Self::MODEL_NAME))
-    }
     fn pipeline_detach_stage(&self, _stage: usize, _state: &mut Box<dyn std::any::Any + Send>) -> Result<PipelineStageJob> {
         Err(anyhow::anyhow!("{} does not support detached pipeline stages", Self::MODEL_NAME))
     }
     fn pipeline_attach_stage(&self, _state: &mut Box<dyn std::any::Any + Send>, _output: PipelineStageOutput) -> Result<()> {
         Err(anyhow::anyhow!("{} does not support detached pipeline stages", Self::MODEL_NAME))
-    }
-    async fn pipeline_stage(&self, _stage: usize, _state: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
-        Err(anyhow::anyhow!("{} does not support stage pipeline", Self::MODEL_NAME))
     }
     async fn pipeline_finish(&mut self, _state: Box<dyn std::any::Any + Send>) -> Result<Token> {
         Err(anyhow::anyhow!("{} does not support stage pipeline", Self::MODEL_NAME))
