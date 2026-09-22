@@ -96,6 +96,9 @@ pub struct Client {
     compact_range_batch: bool,
     remote_sampling: bool,
     connection: Arc<AsyncMutex<ClientConnection>>,
+    /// Extra persistent lanes used by concurrent inference sessions. A session is
+    /// deterministically mapped to one lane, so odd and even concurrency counts work alike.
+    session_connections: Arc<AsyncMutex<HashMap<SessionId, Arc<AsyncMutex<ClientConnection>>>>>,
 }
 
 /// Reuses one persistent connection for every layer assigned to a worker
@@ -259,6 +262,7 @@ impl Client {
                 stream,
                 request_seq: 0,
             })),
+            session_connections: Arc::new(AsyncMutex::new(HashMap::new())),
         };
 
         let resp = client.request(Message::Hello).await?;
@@ -291,9 +295,44 @@ impl Client {
         view
     }
 
+
+    async fn connection_for_session(&self, session_id: SessionId) -> Result<Arc<AsyncMutex<ClientConnection>>> {
+        if session_id == 0 {
+            return Ok(self.connection.clone());
+        }
+        {
+            let lanes = self.session_connections.lock().await;
+            if let Some(connection) = lanes.get(&session_id) {
+                return Ok(connection.clone());
+            }
+        }
+        let mut stream = TcpStream::connect(&self.address)
+            .await
+            .map_err(|e| anyhow!("can't open inference lane to {}: {e}", self.address))?;
+        if let Err(e) = stream.set_nodelay(true) {
+            log::warn!("failed to set TCP_NODELAY for inference lane {}: {}", self.address, e);
+        }
+        Message::Hello.to_writer(&mut stream).await?;
+        let (_, response) = Message::from_reader(&mut stream).await?;
+        if !matches!(response, Message::WorkerInfo(_)) {
+            return Err(anyhow!("unexpected inference-lane handshake from {}: {:?}", self.address, response));
+        }
+        let connection = Arc::new(AsyncMutex::new(ClientConnection { stream, request_seq: 0 }));
+        let mut lanes = self.session_connections.lock().await;
+        Ok(lanes.entry(session_id).or_insert_with(|| connection.clone()).clone())
+    }
+
     /// Send a Message to the worker and return a response.
     async fn request(&self, req: Message) -> Result<Message> {
-        let mut connection = self.connection.lock().await;
+        let session_id = match &req {
+            Message::SingleOp { session_id, .. }
+            | Message::Batch { session_id, .. }
+            | Message::CompactBatch { session_id, .. }
+            | Message::CompactRangeBatch { session_id, .. } => *session_id,
+            _ => 0,
+        };
+        let lane = self.connection_for_session(session_id).await?;
+        let mut connection = lane.lock().await;
         connection.request_seq += 1;
         let req_id = connection.request_seq;
         let req_summary = Self::message_summary(&req);
