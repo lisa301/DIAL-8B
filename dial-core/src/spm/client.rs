@@ -183,6 +183,10 @@ impl Client {
         });
     }
 
+    fn max_session_lanes() -> usize {
+        std::env::var("DIAL_MAX_SESSION_LANES").ok().and_then(|v| v.parse().ok()).filter(|v: &usize| *v > 0).unwrap_or(64)
+    }
+
     fn transfer_trace_enabled() -> bool {
         matches!(
             std::env::var("SPM_TRACE_TRANSFER").ok().as_deref(),
@@ -329,6 +333,9 @@ impl Client {
         }
         let connection = Arc::new(AsyncMutex::new(ClientConnection { stream, request_seq: 0 }));
         let mut lanes = self.session_connections.lock().await;
+        if lanes.len() >= Self::max_session_lanes() {
+            if let Some(oldest) = lanes.keys().copied().min() { lanes.remove(&oldest); }
+        }
         Ok(lanes.entry(session_id).or_insert_with(|| connection.clone()).clone())
     }
 
