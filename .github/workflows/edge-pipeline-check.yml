@@ -1,0 +1,19 @@
+name: edge-pipeline-check
+
+on:
+  push:
+    branches: [edge-pipeline]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check pipeline core
+        run: cargo check -p dial-core --features master
+      - name: Test scheduler and transport
+        run: cargo test -p dial-core --features master spm:: -- --nocapture
