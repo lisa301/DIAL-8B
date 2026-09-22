@@ -350,10 +350,19 @@ impl Client {
         }
         let connection = Arc::new(AsyncMutex::new(ClientConnection { stream, request_seq: 0 }));
         let mut lanes = self.session_connections.lock().await;
-        if lanes.len() >= Self::max_session_lanes() {
-            if let Some(oldest) = lanes.keys().copied().min() { lanes.remove(&oldest); }
+        if let Some(existing) = lanes.get(&session_id) {
+            return Ok(existing.clone());
         }
-        Ok(lanes.entry(session_id).or_insert_with(|| connection.clone()).clone())
+        if lanes.len() >= Self::max_session_lanes() {
+            return Err(anyhow!(
+                "concurrent session lane limit reached for {}: {} active lanes (DIAL_MAX_SESSION_LANES={})",
+                self.address,
+                lanes.len(),
+                Self::max_session_lanes()
+            ));
+        }
+        lanes.insert(session_id, connection.clone());
+        Ok(connection)
     }
 
     pub async fn release_session(&self, session_id: SessionId) -> Result<()> {
