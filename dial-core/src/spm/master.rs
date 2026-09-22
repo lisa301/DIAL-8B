@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io::Write};
 
-use crate::models::{chat::Message, Generator};
+use crate::models::{chat::Message, Generator, PipelineStageJob, PipelineStageOutput};
 
 use super::{api, reset_distributed_profile, with_remote_session, Context, SessionId};
 
@@ -62,14 +62,29 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         Ok(())
     }
 
-    pub async fn prepare_session_step(&mut self, session_id: SessionId, index: usize) -> Result<Box<dyn std::any::Any + Send>> {
+    pub async fn prepare_session_step(&mut self, session_id: SessionId, index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> {
         let state = self.sessions.remove(&session_id).ok_or_else(|| anyhow::anyhow!("unknown pipeline session {session_id}"))?;
         self.model.restore_session(state)?;
-        let hidden = with_remote_session(session_id, self.model.pipeline_prepare(index)).await?
-            .ok_or_else(|| anyhow::anyhow!("{} does not expose pipeline stages", G::MODEL_NAME))?;
+        let hidden = with_remote_session(session_id, self.model.pipeline_prepare(index)).await?;
         let saved = self.model.save_session()?.ok_or_else(|| anyhow::anyhow!("missing session state"))?;
         self.sessions.insert(session_id, saved);
         Ok(hidden)
+    }
+
+    pub fn detach_session_stage(
+        &self,
+        stage: usize,
+        hidden: &mut Box<dyn std::any::Any + Send>,
+    ) -> Result<PipelineStageJob> {
+        self.model.pipeline_detach_stage(stage, hidden)
+    }
+
+    pub fn attach_session_stage(
+        &self,
+        hidden: &mut Box<dyn std::any::Any + Send>,
+        output: PipelineStageOutput,
+    ) -> Result<()> {
+        self.model.pipeline_attach_stage(hidden, output)
     }
 
     pub async fn run_session_stage(&mut self, session_id: SessionId, stage: usize, hidden: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
