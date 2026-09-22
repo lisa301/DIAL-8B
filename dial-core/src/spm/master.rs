@@ -86,6 +86,7 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
     }
 
     pub fn pipeline_stage_count(&self) -> usize { self.model.pipeline_stage_count() }
+    pub fn pipeline_stage_executor(&self, stage: usize) -> Result<std::sync::Arc<dyn crate::spm::Forwarder>> { self.model.pipeline_stage_executor(stage) }
 
     /// Execute exactly one autoregressive step for a session. This is the scheduling
     /// primitive used to interleave A/B/C instead of running A to completion first.
