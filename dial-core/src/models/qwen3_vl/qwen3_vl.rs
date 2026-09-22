@@ -3483,9 +3483,12 @@ impl Generator for Qwen3Vl {
 
     async fn pipeline_prepare(&mut self, index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> {
         // Preserve the specialized RKNN text path when explicitly configured.
-        if self.text_rknn_dir.is_some()
+        if (self.text_rknn.is_some() || self.text_rknn_dir.is_some())
             && (self.ctx.args.text_rknn_prefill || self.text_decode_mode.allows_text_rknn_decode())
         {
+            return Ok(None);
+        }
+        if self.force_shadow_blocks_for_dialog || (index == 0 && Self::shadow_prefill_enabled()) {
             return Ok(None);
         }
 
