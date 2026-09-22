@@ -1079,6 +1079,20 @@ fn resize_to_fixed_square_letterbox(
 }
 
 /// Qwen3-VL 多模态大模型（文本 + 图像） 的核心数据结构定义.
+struct Qwen3VlSessionState {
+    cache: crate::models::llama3::Cache,
+    history: Vec<Message>,
+    tokens: Vec<u32>,
+    image_spans: Vec<(ImageSpan, Tensor)>,
+    deepstack_spans: Vec<Vec<(ImageSpan, Tensor)>>,
+    index_pos: usize,
+    generated: usize,
+    force_shadow_blocks_for_dialog: bool,
+    text_rknn_disabled_for_dialog: bool,
+    text_rknn_prefix_validated_for_dialog: bool,
+    text_rknn_validated_last_layer: Option<usize>,
+}
+
 pub struct Qwen3Vl {
     ctx: Context,
 
@@ -3429,6 +3443,44 @@ impl Generator for Qwen3Vl {
 
     fn generated_tokens(&self) -> usize {
         self.generated
+    }
+
+    fn save_session(&mut self) -> Result<Option<Box<dyn std::any::Any + Send>>> {
+        let fresh_cache = self.ctx.cache.as_new();
+        let state = Qwen3VlSessionState {
+            cache: std::mem::replace(&mut self.ctx.cache, fresh_cache),
+            history: std::mem::take(&mut self.history),
+            tokens: std::mem::take(&mut self.tokens),
+            image_spans: std::mem::take(&mut self.image_spans),
+            deepstack_spans: std::mem::take(&mut self.deepstack_spans),
+            index_pos: std::mem::take(&mut self.index_pos),
+            generated: std::mem::take(&mut self.generated),
+            force_shadow_blocks_for_dialog: std::mem::take(&mut self.force_shadow_blocks_for_dialog),
+            text_rknn_disabled_for_dialog: std::mem::take(&mut self.text_rknn_disabled_for_dialog),
+            text_rknn_prefix_validated_for_dialog: std::mem::take(&mut self.text_rknn_prefix_validated_for_dialog),
+            text_rknn_validated_last_layer: self.text_rknn_validated_last_layer.take(),
+        };
+        Ok(Some(Box::new(state)))
+    }
+
+    fn restore_session(&mut self, state: Box<dyn std::any::Any + Send>) -> Result<()> {
+        let state = state.downcast::<Qwen3VlSessionState>()
+            .map_err(|_| anyhow!("invalid Qwen3-VL pipeline session state"))?;
+        let Qwen3VlSessionState { cache, history, tokens, image_spans, deepstack_spans, index_pos, generated,
+            force_shadow_blocks_for_dialog, text_rknn_disabled_for_dialog,
+            text_rknn_prefix_validated_for_dialog, text_rknn_validated_last_layer } = *state;
+        self.ctx.cache = cache;
+        self.history = history;
+        self.tokens = tokens;
+        self.image_spans = image_spans;
+        self.deepstack_spans = deepstack_spans;
+        self.index_pos = index_pos;
+        self.generated = generated;
+        self.force_shadow_blocks_for_dialog = force_shadow_blocks_for_dialog;
+        self.text_rknn_disabled_for_dialog = text_rknn_disabled_for_dialog;
+        self.text_rknn_prefix_validated_for_dialog = text_rknn_prefix_validated_for_dialog;
+        self.text_rknn_validated_last_layer = text_rknn_validated_last_layer;
+        Ok(())
     }
 }
 
