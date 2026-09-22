@@ -239,6 +239,8 @@ pub enum Message {
     Hello,
     /// Worker把自己的信息发给Master.
     WorkerInfo(WorkerInfo),
+    /// Release all worker-side KV/cache state for a completed logical session.
+    ReleaseSession { session_id: SessionId },
     /// 单算子推理任务（发任务）.
     SingleOp {
         session_id: SessionId,
