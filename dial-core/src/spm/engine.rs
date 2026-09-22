@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
@@ -65,9 +65,18 @@ impl<G: Generator + Send + Sync + 'static> PipelineEngine<G> {
         let (tx, rx) = mpsc::unbounded_channel();
         let sample_len = master.ctx.args.sample_len;
         let stage_count = master.pipeline_stage_count().max(1);
-        let stage_slots = (0..stage_count)
-            .map(|_| Arc::new(Semaphore::new(1)))
-            .collect();
+        let mut resources: HashMap<String, Arc<Semaphore>> = HashMap::new();
+        let mut stage_slots = Vec::with_capacity(stage_count);
+        for stage in 0..stage_count {
+            let key = master
+                .pipeline_stage_key(stage)
+                .unwrap_or_else(|_| format!("stage-{stage}"));
+            let slot = resources
+                .entry(key)
+                .or_insert_with(|| Arc::new(Semaphore::new(1)))
+                .clone();
+            stage_slots.push(slot);
+        }
         (
             tx,
             Self {
