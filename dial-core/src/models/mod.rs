@@ -55,6 +55,19 @@ pub trait Generator {
 
     /// Return the next token.
     async fn next_token(&mut self, index: usize) -> Result<Token>;
+
+    /// Number of independently schedulable transformer stages for this model.
+    fn pipeline_stage_count(&self) -> usize { 1 }
+
+    /// Stage-split execution hooks. Models may expose a prepared hidden state and
+    /// advance it one owner-contiguous stage at a time. Defaults preserve legacy behavior.
+    async fn pipeline_prepare(&mut self, _index: usize) -> Result<Option<Box<dyn std::any::Any + Send>>> { Ok(None) }
+    async fn pipeline_stage(&self, _stage: usize, _state: Box<dyn std::any::Any + Send>) -> Result<Box<dyn std::any::Any + Send>> {
+        Err(anyhow::anyhow!("{} does not support stage pipeline", Self::MODEL_NAME))
+    }
+    async fn pipeline_finish(&mut self, _state: Box<dyn std::any::Any + Send>) -> Result<Token> {
+        Err(anyhow::anyhow!("{} does not support stage pipeline", Self::MODEL_NAME))
+    }
     /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize;
 
