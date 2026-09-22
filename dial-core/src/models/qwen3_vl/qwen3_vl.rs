@@ -1529,7 +1529,7 @@ impl Qwen3Vl {
             let mut ref_x = x.clone();
             for block_idx in 0..=decode_last_layer {
                 ref_x = self.blocks[block_idx]
-                    .forward_mut(&ref_x, idx, block_idx, &mut ref_cache)
+                    .forward(&ref_x, idx, block_idx, &mut ref_cache)
                     .await
                     .map_err(|e| {
                         anyhow!("text rknn prefix reference block {block_idx} failed: {e}")
