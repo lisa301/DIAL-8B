@@ -427,21 +427,39 @@ where
     tokio::spawn(async move {
         let id = format!("dial-{session_id}");
         let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let start = Instant::now();
+        let mut ttft_s: Option<f64> = None;
         while let Some(event) = event_rx.recv().await {
             match event {
                 EngineEvent::Token(token) => {
+                    if ttft_s.is_none() {
+                        ttft_s = Some(start.elapsed().as_secs_f64());
+                    }
                     let chunk = StreamResponse { id: id.clone(), object: "chat.completion.chunk".into(), created, model: model.clone(), choices: vec![StreamChoice { index: 0, delta: StreamDelta { content: Some(token) }, finish_reason: None }], ttft_s: None, total_s: None, tokens_per_second: None, decode_tokens_per_second: None, generated_tokens: None, distributed_overhead_s: None, remote_compute_s: None, remote_requests: None };
-                    if let Ok(j) = serde_json::to_string(&chunk) { let _ = tx.send(format!("data: {j}\\n\\n")); }
+                    if let Ok(j) = serde_json::to_string(&chunk) { let _ = tx.send(format!("data: {j}\n\n")); }
                 }
                 EngineEvent::Finished { generated_tokens, elapsed_s, profile } => {
-                    let final_chunk = StreamResponse { id: id.clone(), object: "chat.completion.chunk".into(), created, model: model.clone(), choices: vec![StreamChoice { index: 0, delta: StreamDelta { content: None }, finish_reason: Some("stop".into()) }], ttft_s: None, total_s: Some(elapsed_s), tokens_per_second: if elapsed_s > 0.0 { Some(generated_tokens as f64 / elapsed_s) } else { None }, decode_tokens_per_second: None, generated_tokens: Some(generated_tokens), distributed_overhead_s: Some(profile.distributed_overhead_s()), remote_compute_s: Some(profile.remote_compute_s), remote_requests: Some(profile.remote_requests) };
-                    if let Ok(j) = serde_json::to_string(&final_chunk) { let _ = tx.send(format!("data: {j}\\n\\n")); }
-                    let _ = tx.send("data: [DONE]\\n\\n".into()); break;
+                    let tokens_per_second = if elapsed_s > 0.0 {
+                        Some(generated_tokens as f64 / elapsed_s)
+                    } else {
+                        None
+                    };
+                    let decode_tokens_per_second = ttft_s.and_then(|ttft| {
+                        let decode_s = elapsed_s - ttft;
+                        if generated_tokens > 1 && decode_s > 0.0 {
+                            Some((generated_tokens - 1) as f64 / decode_s)
+                        } else {
+                            None
+                        }
+                    });
+                    let final_chunk = StreamResponse { id: id.clone(), object: "chat.completion.chunk".into(), created, model: model.clone(), choices: vec![StreamChoice { index: 0, delta: StreamDelta { content: None }, finish_reason: Some("stop".into()) }], ttft_s, total_s: Some(elapsed_s), tokens_per_second, decode_tokens_per_second, generated_tokens: Some(generated_tokens), distributed_overhead_s: Some(profile.distributed_overhead_s()), remote_compute_s: Some(profile.remote_compute_s), remote_requests: Some(profile.remote_requests) };
+                    if let Ok(j) = serde_json::to_string(&final_chunk) { let _ = tx.send(format!("data: {j}\n\n")); }
+                    let _ = tx.send("data: [DONE]\n\n".into()); break;
                 }
                 EngineEvent::Error(e) => {
                     let payload = serde_json::json!({ "error": e }).to_string();
-                    let _ = tx.send(format!("data: {payload}\\n\\n"));
-                    let _ = tx.send("data: [DONE]\\n\\n".into());
+                    let _ = tx.send(format!("data: {payload}\n\n"));
+                    let _ = tx.send("data: [DONE]\n\n".into());
                     break;
                 }
             }
